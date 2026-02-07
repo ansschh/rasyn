@@ -1,0 +1,31 @@
+# Verifier ensemble configuration
+
+# RDKit sanity checks
+rdkit:
+  check_atom_balance: true
+  atom_balance_tolerance: 2  # Allow small mismatches for reagent atoms
+  max_fragments: 5
+  max_mw: 1500.0
+
+# Forward model round-trip verification
+roundtrip:
+  forward_model_checkpoint: null  # Path to forward model checkpoint
+  similarity_threshold: 0.85     # Tanimoto threshold for soft match
+  use_tanimoto_fallback: true    # Use Tanimoto when no forward model
+
+# RDChiral template check
+template:
+  enabled: true
+  # Template extraction happens at preprocessing time
+
+# Ensemble logic
+ensemble:
+  # Hard reject if RDKit parse fails
+  rdkit_hard_reject: true
+  # Hard reject if BOTH roundtrip and template disagree
+  dual_disagree_reject: true
+  # Confidence weights
+  weights:
+    rdkit: 0.2
+    roundtrip: 0.5
+    template: 0.3

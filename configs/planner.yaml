@@ -1,0 +1,23 @@
+# Multi-step planner configuration
+
+# A* search settings
+astar:
+  max_depth: 10          # Maximum route depth
+  max_nodes: 5000        # Maximum nodes to expand
+  max_time_seconds: 300  # 5 minute time limit
+  beam_width: 20         # Candidates per expansion
+  max_routes: 5          # Maximum routes to return
+
+# Inventory settings
+inventory:
+  # Path to purchasable molecule list (one SMILES per line)
+  # If null, uses built-in common building blocks
+  file_path: null
+  # Additional building block files to load
+  additional_files: []
+
+# MCTS settings (future)
+mcts:
+  num_simulations: 1000
+  exploration_constant: 1.414
+  max_depth: 15

@@ -1,0 +1,843 @@
+Below is a concrete, “you can start coding this” end‑to‑end plan for a **production-ready hybrid retrosynthesis planner** that explicitly combines:
+
+* **Local reactivity / edit prediction (Retro‑MTGR)**: reaction center + leaving group (LG) modeling with interpretable graph outputs.
+* **Global generation (RSGPT)**: LLaMA2‑style decoder LLM trained on massive synthetic reaction data + PPO/RLAIF.
+* **Industrial usefulness layer**: verifier + process-aware scoring (safety + scale proxies) + route search optimized for process quality (not just likelihood) + UI explanations.
+
+I’ll be opinionated and also call out tradeoffs + how to de-risk them.
+
+---
+
+## 0) Define your product output contract (what “production-ready” means)
+
+Before code: define an explicit output schema that everything in the pipeline conforms to.
+
+### Input
+
+* Target product: **SMILES** (optionally with stereochem)
+* Optional constraints:
+
+  * “avoid reagents”: list
+  * allowed solvent list
+  * max temp range
+  * max step count
+  * “only scalable transformations” toggle
+  * “prefer known chemistry” vs “explore novelty” slider
+
+### Output
+
+A ranked list of **routes**, each route is a list of steps. Each step contains:
+
+* `reactants[]` (SMILES)
+* `reagents[]` / `catalysts[]` / `solvents[]` (optional, can be empty early)
+* `conditions` (temp, time, atmosphere, etc; optional early)
+* `edit_explanation` (bond(s) broken/formed highlighted on product)
+* `precedents[]` (nearest neighbor reactions/snippets)
+* `verifier_results` (forward check / round-trip / template applicability)
+* `process_scores` (safety, scalability proxies, cost, greenness proxies, confidence)
+* `risk_tags[]` (e.g., “strong oxidant”, “diazotization”, “cryogenic”, “pressure”, “toxic gas risk”)
+
+This contract forces discipline: your models can evolve, but the product stays stable.
+
+---
+
+## 1) Architecture you’re building (the “hybrid generator” as a system)
+
+### Core idea
+
+**Graph head proposes “what to disconnect/modify” (interpretable) → LLM proposes “how to realize it” (reactants + optional conditions) → verifier rejects nonsense → process ranker reorders candidates for industry** → planner/search uses ranker for multi-step.
+
+Concretely:
+
+1. **Graph Edit Head (Retro‑MTGR++)**
+
+* Input: product molecule graph
+* Output: top‑K edit hypotheses:
+
+  * reaction center bond(s) candidate(s)
+  * synthon(s)
+  * leaving groups (or “edit tokens” for functional-group ops)
+
+Retro‑MTGR’s original framing is: predict reaction center + LGs using multitask graph representation learning, bond energy features, LG co-occurrence graph, and a contrastive AEE training trick. It focuses on **broad-sense coupling** after discarding protection/deprotection/redox in their main dataset variant.
+
+2. **Conditional LLM Generator (RSGPT++)**
+
+* Input: product SMILES + edit hypothesis (encoded as tokens) + optional constraints
+* Output: candidate reactant sets (+ optionally conditions/reagents)
+
+RSGPT is a LLaMA2-based decoder-only LLM with BPE tokenization; it’s trained via:
+
+* large-scale synthetic pretraining with RDChiral-generated reactions,
+* RLAIF using RDChiral as an automated feedback oracle,
+* and fine-tuning on real retrosynthesis datasets.
+
+They implement RLAIF with **PPO + KL penalty**.
+
+3. **Verifier ensemble**
+
+* Fast RDKit sanity
+* Round-trip / forward predictor
+* Template applicability check (when available)
+* Optional hazardous product formation model
+
+4. **Process-aware ranker**
+
+* Safety score
+* Scalability proxies
+* Cost/availability proxies
+* Greenness proxies (PMI-like)
+* Interpretability completeness score
+
+5. **Planner/search**
+
+* MCTS or A*/best-first with your score as objective
+  (e.g., ideas from Retro* A*-like search, or MCTS as in AiZynthFinder)
+
+For benchmarking + “don’t reinvent the plumbing”, you can integrate with **Syntheseus** (a library for end-to-end planning + consistent evaluation).
+
+---
+
+## 2) Get the baselines running first (but “baseline” here means *your exact pipeline skeleton*)
+
+Even if you “skip phase 1”, you still need a minimal working spine:
+
+* Run Retro‑MTGR (or your re-implementation) **as a standalone edit proposer**.
+* Run RSGPT **as a standalone generator** (their repo exists).
+* Implement an orchestrator that can call:
+
+  * `graph_head(product) -> edits`
+  * `llm(product, edit, constraints) -> reactants`
+  * `verify(product, reactants) -> pass/fail + confidence`
+  * `score(step) -> process score`
+  * `search(routes) -> ranked routes`
+
+Once the spine exists, every improvement becomes “swap component X”.
+
+---
+
+## 3) Data: what you need, and how to structure it so it supports safety/scale/interpretability
+
+### 3.1 Reaction corpora (real)
+
+You need multiple “views” of reaction data:
+
+1. **Retrosynthesis (reactants given product)**
+
+* USPTO-50k / USPTO-MIT / USPTO-FULL are used heavily in both papers; RSGPT fine-tunes on these【130:0†s41467-025-62308-6 (1).pdf†L15-L18】 and reports Top-1 ~63.4% on USPTO-50k (reaction class unknown)【130:0†s41467-025-62308-6 (1).pdf†L23-L27】.
+
+2. **Forward prediction** (for verification)
+
+* Train your own forward model on the same corpora (reactants→product).
+* OR use ORD-style cleaned datasets.
+
+3. **Condition data**
+   Patents are messy; conditions are often not structured.
+   For strDerly**:
+
+* ORD provides a schema/infrastructure for structured .
+* ORDerly builds benchmark datasets for forward/retro/condition prediction using data in ORD format.
+
+### 3.2 Synthetic pretraining data (massive)
+
+If you want RSGPT-level generalization, you want the same idea: **template-based generation at huge scale**.
+RSGPT:
+
+* BRICS fragment 78M molecules (PubChem/ChEMBL/Enamine) → ~2M fragments
+* match fragments to template reaction centers extracted from USPTO-FULL via RDChiral reverse template extraction
+* generate **10,929,182,923** synthetic reaction entries【130:1†s41467-025-62308-6 (1).pdf†L16-L23】
+  They also describe practical details (counts, RDKit version, test-set overlap checks)【130:8†s41467-025-62308-6 (1).pdf†L22-L33】.
+
+Important limitation they note: their RDChiral synthetic generator is only applicable to reactions with **1–3 reactants**【130:5†s41467-025-62308-6 (1).pdf†L159-L165】. This matters for “industry usefulness” because many steps involve more context.
+
+### 3.3 Safety and scale labels (the hard part)
+
+Industry usefulness lives here—and public data is sparse.
+
+You shoulde A: build **proxy labels** (imperfect but actionable)
+
+* **Safety proxy**:
+
+  * reagent hown hazardous transformation classes
+  * optional hazardous product formation predictor: Kim et al. propose an explainable mwith low false negatives.
+* **Scalability proxy**:
+
+  * penalize extreme temperature/pressure, cryogenic steps, explosive/peroxide-forming motifs, unstable intermediates
+  * penalize rare reagents, exotic catalysts, protecting group churn
+  * penalize high synthetic complexity (SCScore concept)
+  * incorporate greenness proxies such as **PMI** (process mass intensity) at least as a heuristic knob.
+  * optionally incorporate a route cost metric like RouteScore as a route-level feature.
+
+#### Stage B: migrate to **real labels**
+
+* from internal ELN / process development reports:
+
+  * demonstrated scale (g/kg), yields, impurity profiles, safety incidents
+* from chemist preference collection:
+
+  * pairwise ranking (“which step would you run?”)
+  * “this is unacceptable because X” tags
+
+This is what will differentiate your product; it’s also where your model becomes proprietary.
+
+---
+
+## 4) Data preprocessing: implement once, never touch again (unless you version it)
+
+### 4.1 Canonicalization and atom mapping policy
+
+* For the **LLM**: avoid atom mapping in input to reduce leakage and increase realism. RSGPT explicitly notes atomic mapping can inflate performance but is a leakage risk【130:7†s41467-025-62308-6 (1).pdf†L26-L31】.
+* For the **graph head**: you can use atom-mapped reactions *only to derive labels*, then drop mapping from inputs.
+
+### 4.2 Unified reaction record schema (recommended)
+
+Store everything you can, even if some fields are empty initially.
+
+```json
+{
+  "id": "...",
+  "product_smiles": "...",
+  "reactants_smiles": ["...", "..."],
+  "reagents_smiles": ["..."],
+  "solvents_smiles": ["..."],
+  "conditions": {"temp_c": null, "time_h": null, "pressure_bar": null},
+  "atom_mapped_reaction_smiles": "...", 
+  "reaction_class": null,
+  "labels": {
+    "changed_bonds": [[i, j], ...],
+    "reaction_center_bond": [i, j],
+    "synthons_smiles": ["...", "..."],
+    "leaving_groups": ["...", "..."],
+    "edit_tokens": ["DISCONNECT:i-j", "LG1:Cl", "LG2:H"]
+  },
+  "process_labels": {
+    "hazard_tags": [],
+    "scale_proxy_score": null,
+    "safety_proxy_score": null
+  }
+}
+```
+
+### 4.3 Retro‑MTGR label extraction specifics
+
+Retro‑MTGR’s pipeline assumes:
+
+* idenns by disconnecting
+* predict LGs as multiclass labels, aided by an LG co-occurrence graph【38:8†s41467-025-56062-y.pdf†L87-L96】.
+
+They also highlight heavy **LG imbalance** (e.g., “H” occurs 27624 times in USPTO-50K) and that enumerating LGs from training causes coverage issues on test【38:3†s41467-025-56062-y.pdf†L20-L30】.
+
+**Actionable preprocessing you should implement:**
+
+* Build the LG vocabulary on a *larger corpus than your training split* (e.g., USPTO-FULL) to reduce OOV.
+* Track LG frequency; you’ll need reweighting later.
+
+---
+
+## 5) Component A — Graph Edit Head (Retro‑MTGR++) implementation plan
+
+### 5.1 Re-implement Retro‑MTGR cleanly first
+
+Key architectural pieces to match:
+
+1. **Atom features**: 28-d initial vector (atom type, hydrogens, degree, aromaticity, formal charge, atomic mass)【38:5†s41467-025-56062-y.pdf†L23-L30】.
+2. **Dense atom MLP**: 3-layer MLP mapping semisparse to dense 32-d; they mention 64 and 32 neurons in hidden/output layers【38:5†s41467-025-56062-y.pdf†L31-L35】.
+3. **MPNN**: they empirically found **2 layers** best for their setting【38:5†*AEE contrastive training trick**:
+
+   * treat combined synthons as a “perturbed molecule” (positive pair)
+   * random other molecule as negative
+   * contrastidings【38:0†s41467-025-56062-y.pdf†L1-L13】.
+   * AEE is **removed at test time** (it’s a training-only regularizer)【38:15†s41467-025-56062-y.pdf†L8-L18】.
+4. **RCP (reaction center predictor)**:
+
+   * bond-level readout, bond embedding augmented by theoretical bond energy【38:8†s41467-025-56062-y.pdf†L91-L93】.
+5. **LGP (leaving group predictor)**:
+
+   * embed an LG co-occurrence graph, measure proximity between LG embeddings and synthon embeddings【38:8†s41467-025-56062-y.pdf†L93-L96】.
+     7ond loss + contrastive + group loss【38:15†s41467-025-56062-y.pdf†L1-L7】.
+
+Training notes they report:
+
+* Adam optimizer, initidf†L39-L41】.
+
+### 5.2 Extend Retro‑MTGR to be usable in industry (critica:
+
+* It discards protection/deprotection/redox in their main dataset; those are important in real multistep synthesis【38:5†s41467-025-56062-y.pdf†L12-L17】【38:3†s41467-025-56062-y.pdf†L35-L43】.
+* It’s focused odify atoms in branches or small functional groups” and should be extende7-025-56062-y.pdf†L35-L43】.
+* It lacks yields/conditions integration and suggests future integration【38:3†s41467-025-5MTGR++” needs a more general edit vocabulary.
+
+#### Upgrade A: “Edit vocabulary” beyond a single bond cut
+
+Goal: still interpretable, but covons (FGI)
+
+* protection/deprotection
+* redox steps
+* rearrangements (maybe lnt each step as:
+
+  * set of broken/formed bonds (graph edit set)p token” if bond change is minimal but chemistry changes.
+
+This is the most important *non-obvious* change for industrial usefulness: **many “good” routes require these “minority” steps** that USPTO-50k-based modelswith a two-head model:
+
+1. **bond disconnection head** (as Retro‑MTGR)
+2. **operation classifier** that activates when bond-disconnection confidence otect, oxidize, reduce, none})
+
+* Use reaction class labels (if available) nterpretability (chemists see “this is a deprotection” + affected substructure).
+  Cons:
+* Requires carefully designed labels; patents can be noisy.
+
+De-risk:
+
+* Build an evaluation set of known routes (even 200–500 examples) and measure “coverage of needed step types”.
+
+#### Upgrade B: Top‑M LGs, not just top‑1
+
+Retro‑MTGR outputs top‑k via top‑k bonds, but only **top‑1 LGs** per synthon in their described metric computation【38:15†s41467-025-56062-y.pdf†L31-L34】.
+For industry, you want multiple LG options because LG choice drives feasibility, safety, and scalability.
+
+Implementation:
+
+* Make LGP output top‑M LGs per synthon.
+* Pass these as candidate edit contexts to the LLM (or directly form reactant candidates).
+
+Pros:
+
+* Big diversity gain.
+  Cons:
+* Combinatorial explosion (K bonds × M² LG pairs).
+
+De-risk:
+
+* Do a two-stage prune: (bond candidates) → (LG candidates) → cheap feasibility filter → then LLM.
+
+#### Upgrade C: Fix LG imbalance with targeted generation
+
+Retro‑MTGR explicitly warns minority LGs have insufficient data and suggests generative algorithms to create more examples【38:3†s41467-025-56062-y.pdf†L20-L27】.
+You have RSGPT + RDChiral: use them to **generate extra reactions** involving underrepresented LGs and re-train the LGP.
+
+Implementation:
+
+* Identify bottom-quartile LGs by frequency.
+* Generate synthetic reactions *conditioned on those LGs* (template-driven).
+* Add to LGP training only hesis evaluation splits).
+
+Pros:
+
+* Addresses a real bottleneck called out in the paper.
+  Cons:
+* Synthetic data distribution shift.
+
+De-risk:
+
+* Keep a “real-only” validation set; only accept improvements that hold there.
+
+---
+
+## 6) Component B — LLM generator (RSGPT++) implementation plan
+
+### 6.1 Use RSGPT repo + weights as the base
+
+Nature Communications states code/models are available (GitHub + Zenodo), and the GitHub repo exists.
+
+### 6.2 Understand the original training recipe (so you can modify it safely)
+
+**Synthetic data generation**
+
+* Templates from USPTO-FULL (RDChiral reverse extraction)L/Enamine
+* Total 10.9B synthetic entries【130:1†s41467-025-62308-6 (1).pdf†L16-L23】
+  and detailed fragment counts are listed【130:8†s41467-025-62308-6 (1).pdf†L22-L33】.
+
+**Pretraining tasks**
+They define four self-supervised tasks to capture relationships between product/reactants/template【130:4†s41467-025-62308-6 (1).pdf†L11-L24】.
+
+**RLAIF**
+RDChiral “backtracks” generated reactants+template to the product; reward is binary match (1/0)【130:0†s41467-025-62308-6 (1).pdf†L10-L14】.
+They implement RLAIF using **PPO** with KL penalty【130:15†s41467-025-62308-6 (1).pdf†L15-L33】.
+
+**Training config**
+They report LLaMA2 24-layer, 2048 hidden, 32 heads; cosine annealing LR up to 1e-4; AdamW; 62 epochs on 8×A100 with DeepSpeed; fine-tuning LR 1e-5 over 5 epochs【38:1†s41467-025-62308-6 (1).pdf†L7-L17】.
+
+### 6.3 Modify RSGPT into a conditioned generator (edit → reactants)
+
+This is the key hybridization step.
+
+#### Step 1: define an “Edit Token Language”
+
+You need a text representation that is:
+
+* deterministic
+* compact
+* easy to parse
+* stable across RDKit canonicalization
+
+Example (conceptual):
+
+```
+<PROD> {product_smiles}
+<EDIT>
+  DISCONNECT BOND a{i}-a{j}
+  SYNTHON:contentReference[oaicite:45]{index=45} LG_HINTS [Cl, Br, OTf] [H, OH]
+<CONSTRAIN:contentReference[oaicite:46]{index=46}...
+<OUT> 
+```
+
+You can include synthons explicitly (most interpretable), or only the bond indices; synthons are more robusbuild an edit-conditioned fine-tuning dataset
+For every real reaction:
+
+* compute the ground-truth edit token
+* build a prompt
+* output is reactants (+ optionalltep 3: fine-tune RSGPT to obey edits
+  Objective:
+* maximize likelihood of reactant SMILES given product + edit context
+
+This will:
+
+* make outputs *more explainable* (because you can shctants that happen to work” (a common LLM failure mode)
+
+**Tradeoff:** If your edit extraction is noisy, you’ll train the LLM on inconsistent conditioning and it may become brittle.
+
+De-risk:
+
+* start with “high-confidence edits only” subset (where mapping/bond-change is clean)
+* expand coverage gradually
+
+### 6.4 Fix RSGPT limitations explicitly (to meet your “industry usefulness” goals)
+
+RSGPT itself lists:
+
+* synthetic data quality needs improvement,
+* RDChiral generator limited to 1–3 reactants,
+* outputs aren’t chemically explainable,
+* no conditions/solvent modeling yet【130:5†s41467-025-62308-6 (1).pdf†L159-L165】.
+
+Your hybrid system addresses “explainability” via the graph head + edit tokens. Now tackle the others:
+
+#### A) Go beyond 1–3 reactants (data + modeling)
+
+Options:
+
+1. **Add real multi-reactant data** (from ORD/ELN) and fine-tune.
+2. **Synthesize multi-reactant synthetic data** with a different generator than RDChiral templates alone (harder).
+
+Realistic path:
+
+* Keep RSGPT pretraining largely as-is (huge benefit).
+* Add a second fine-tuning stage on **multi-reactant** reactions from your curated corpora (ORD/ELN). ORDerly explicitly supports generating datasets for condition prediction too.
+
+Pros:
+
+* avoids rebuilding a synthetic generator.
+  Cons:
+* you may still be limited by multi-reactant coverage.
+
+#### B) Add condition generation (but keep it optional)
+
+Do not block route planning on conditions initially; industry adoption can start with “good disconnections + plausible reactants.”
+
+Implementation approach:
+
+* Multi-head output format:
+
+  * required: reactants
+  * optional: reagents/solvents/conditions
+
+Training:
+
+* when conditions missing, use `<NULL>` tosk:
+* Evaluate condition suggestions separately; don’t let noisy condition labels poison reactant generation.
+
+---
+
+## 7) Component C — Verifiers: make “chemically accurate” mean something operational
+
+You want to optimize for “chemically correct + feasible + scalable”. You need objective gates.
+
+### 7.1 Fast sanity checks (cheap, always on)
+
+* RDKit parse + sanitize all predicted SMILES
+* remove duplicates after canonicalization
+* enforce max number of fragments/reactants
+
+### 7.2 Round-trip verification
+
+Two complementary verifiers:
+
+1. **Forward prediction model**
+
+* Input: reactants (+ reagents/conditions if you predict them)
+* Output: predicted product
+* Check equality (canonical SMILES) or high similarity
+
+2. **Template applicability check**
+
+* If you have a template hypothesis (from edit head or retrieval), apply RDChiral to see if reactants can produce the product.
+
+RSGPT already uses RDChiral as a correctness oracle in RLAIF: backtrack predicted reactants+templates and reward by matching product【130:0†s41467-025-62308-6 (1).pdf†L10-L14】. You can reuse that machinery for verification even if final inference is “template-free”.
+
+### 7.3 Safety verifier (optional but aligned with your goals)
+
+A practical add-on:
+
+* hazardous product formation risk model (binary classifier) as an additional veto or penalty signal. Kim et al. present an explainable model for predicting hazardous product formation.
+
+You can start with:
+
+* hard blacklist rules + reagent hazard flags
+  then add:
+* learned hazard predictor
+
+---
+
+## 8) Component D — Process-aware scoring (this is where “industry value” lives)
+
+This should be its own module with clear interfaces, so you can iterate without retraining the generator.
+
+### 8.1 Start with a deterministic “ProcessScore v0” (rules + heuristics)
+
+Features you can compute immediately from SMILES and (optional) predicted conditions:
+
+**Safety features**
+
+* reagent hazard class flags
+* known dangerous motifs (azides, diazo, peroxides, etc.)
+* “hazardous product formation” predicted probability (if you add that classifier)
+
+**Scalability features**
+
+* penalize:
+
+  * cryogenic temps
+  * pressurized conditions
+  * highly sensitive reagents
+  * proteury usage
+* incorporate complexity proxies:
+
+  * SCScore-like synthetic complexity as an input feature
+
+**Greenness/cost proxies**
+
+* PMI-like penalty (even rough) because PMI is a standard green metric in process chemistry.
+* RouteScore-like route cost concept can be used at route level.
+
+Output:
+
+* `process_score = w_safety*safety + w_scale*scale + w_cost*cost + w_green*green + w_conf*confidence`
+
+Make weights user-adjustable in UI (industry teams differ).
+
+### 8.2 Then build a learned ranker (ProcessScore v1)
+
+Train a model to rank candidate steps by “process preference”.
+
+Data sources (in order of practicality):
+
+1. internal ELN/process data (best)
+2. chemist pairwise preferences (collect quickly)
+3. weak labels from heuristics (bootstrap)
+
+Model choices:
+
+* Gradient-boosted trees for tabular descriptors (fast, interpretable)
+* Small graph model that reads reaction graph edits + reagent descriptors
+* Or a “reward model” used for RL (later)
+
+**Critical point:** keep the learned ranker *separate* from the LLM initially.
+Otherwise you’ll confound “generator errors” with “scoring errors”.
+
+De-risking strategy:
+
+* Freeze generator, train ranker.
+* Evaluate ranker via:
+
+  * how often it promotes verifier-pass candidates
+  * how often chemists prefer its top candidate
+  * calibration curves on safety vetoes (false negatives are unacceptable for safety models)
+
+---
+
+## 9) Component E — Multi-step planner/search optimized for process score
+
+You have two good starting points:
+
+* **A* / best-first** style (Retro* conceptually)
+* **MCTS** style (AiZynthFinder)
+
+For a process-aware planner, A* is often easier to reason about because you can define a cost function explicitly.
+
+### 9.1 Define your search state and transition
+
+State:
+
+* multiset of molecules remaining to synthesize
+
+Action:
+
+* choose one molecule `m`
+* call hybrid single-step model → candidate precursor sets `{p1, p2, ...}`
+* replace `m` with `{p1, p2, ...}`
+
+Terminal:
+
+* all molecules purchasable/in-stock
+
+### 9.2 Cost function (what you actually optimize)
+
+Instead of maximizing likelihood, optimize:
+
+`route_cost = sum(step_cost) + heuristic(remaining)`
+
+Where:
+
+* `step_cost` is derived from your **process score** (penalize risky/unscalable steps)
+* heuristic(remaining) could use:
+
+  * SCScore (remaining complexity)
+  * number of non-stock molecules
+
+### 9.3 Use Syntheseus for evaluation + modularity
+
+Syntheseus is explicitly designed to combine search algorithms and reaction models in a standardized way and benchmark them. Using it early prevents you from accidentally “cheating” in evaluation (which is common in retrosynthesis).
+
+### 9.4 Benchmark routes properly
+
+Use PaRoutes for route benchmarking: it provides route sets, stock lists, curated reactions, and scripts for route quality/diversity.
+
+---
+
+## 10) Interpretability: make the model explain itself in a way chemists trust
+
+### 10.1 Step-level explanation artifacts
+
+For each proposed step, store and show:
+
+* **Highlighted reaction center bond(s)** on the product
+  (from graph head)
+* **Synthon structures** (human readable)
+* **LG / edit hypothesis** (and its score)
+* **LLM output reactants** with confidence and alternatives
+* **Verifier evidence**:
+
+  * forward model predicted product match score
+  * RDChiral/template applicability (if used)
+* **ProcessScore breakdown**:
+
+  * which hazards triggered penalties
+  * which scale proxies triggered penalties
+
+This is the key advantage of the hybrid design: interpretability becomes a *first-class output*, not a post-hoc saliency map.
+
+### 10.2 Precedent retrieval (RAG for chemists)
+
+Add a retrieval layer:
+
+* For each candidate step, retrieve similar reactions from your corpus:
+
+  * similarity on product scaffold + reaction center environment
+* Show the top precedents in UI.
+
+This is often what convinces chemists: “have we seen this transformation before, on similar substrate?”
+
+---
+
+## 11) Training plan on a GPU cluster (practical engineering)
+
+### 11.1 Repo layout (recommended)
+
+```
+retrosynth/
+  data/
+    raw/
+    processed/
+    ord/
+  preprocess/
+    canon.py
+    atommap.py
+    extract_edits.py
+    build_lg_vocab.py
+    build_lgcog.py
+  models/
+    graph_head/
+      mtgr.py
+      losses.py
+      train.py
+    llm/
+      tokenizer/
+      finetune.py
+      rlaif_ppo.py
+    forward/
+      train_forward.py
+  scoring/
+    rules.py
+    process_ranker.py
+  planner/
+    search_a_star.py
+    search_mcts.py
+    inventory.py
+  serve/
+    api.py
+    workers/
+  ui/
+```
+
+### 11.2 Graph head training (distributed not required)
+
+Retro‑MTGR is relatively lightweight; you can train with DDP if needed.
+Match their baseline configuration first (features, 2-layer MPNN, etc.)【38:5†s41467-025-56062-y.pdf†L41-L46】.
+
+### 11.3 LLM fine-tuning
+
+Follow RSGPT’s recipe as a starting point:
+
+* DeepSpeed is used in their training【38:1†s41467-025-62308-6 (1).pdf†L13-L14】.
+* They used cosine LR schedule to 1e-4, AdamW【38:1†s41467-025-62308-6 (1).pdf†L9-L12】.
+
+Your modifications:
+
+* new conditioning tokens (edit language)
+* optional constrained decoding
+
+### 11.4 PPO/RLAIF extension
+
+RSGPT uses PPO with KL penalty in RLAIF【130:15†s41467-025-62308-6 (1).pdf†L15-L33】.
+
+You can extend rewards from binary RDChiral match to multi-objective:
+
+* base reward: verifier pass (forward match / RDChiral)
+* penalties: process risk (hazard/scalability)
+* novelty reward: distance from nearest precedent (optional, careful)
+
+**But be careful:** multi-objective RL can destabilize training.
+
+De-risk:
+
+* Start with **reward shaping only in reranking**, not RL.
+* Then do RL with a very small coefficient on process terms.
+* Keep a KL constraint strong to prevent mode collapse.
+
+---
+
+## 12) Deployment plan: how to serve this as a product people will use
+
+### 12.1 Services
+
+Split into stateless services:
+
+* `graph_head_service` (PyTorch)
+* `llm_service` (vLLM/Triton/DeepSpeed inference)
+* `verifier_service` (forward model + RDChiral)
+* `process_score_service`
+* `planner_service` (search orchestration)
+
+### 12.2 Latency strategy (important)
+
+* Graph head produces K edits quickly.
+* Batch LLM calls across edits (don’t do sequential).
+* Cache:
+
+  * product → edits
+  * (product, edit) → reactant candidates
+  * verifier outcomes
+
+### 12.3 Monitoring
+
+Log:
+
+* what chemists clicked / accepted
+* which constraints they used
+* failure categories (invalid SMILES, verifier fail, unsafe flags)
+  Use this as training data for:
+* ranker improvement
+* preference learning
+
+---
+
+## 13) The “realistic build order” (what to implement first so you don’t get stuck)
+
+Here’s a build order that avoids dead ends:
+
+1. **Implement unified data schema + preprocessing**
+   (canonicalization, edit extraction, LG vocab, LG co-occurrence graph, inventory)
+2. **Implement Retro‑MTGR baseline** and export top‑K from their repo as a black-box generator (get inference working).
+3. **Create edne-tune RSGPT to follow edits.
+4. **Implement v checks when available).
+5. **Implement ProcessScore v0 (rules)** + reranker.
+6. **Integrate a basic planner** (A* or MCTS) using your new score, evaluate in Synthese
+7. **Add PaRoutes benchmarking** to test route success/diversity objectively.
+8. **Only then**: learned process ranker, then RL.
+
+---
+
+## 14) Critical tradeoffs and how to test them early
+
+### Tradeoff 1: “Generator-first” vs “Verifier-first”
+
+* If you over-invest in generator accuracy, you’ll still ship unusable steps.
+* If you over-invest in verifiers, you may reject novel but valid chemistry.
+
+**Test**: measure how many of your top‑N suggestions survive verifier + are liked by chemists, not just top‑1 exact match.
+
+### Tradeoff 2: Interpretability vs performance
+
+* Edit conditioning increases control, but can reduce raw top‑k if edits are wrong.
+
+**Test**: create two test modes:
+
+* free generation
+* edit-conditioned generation
+  Compare:
+* verifier pass rate
+* diversity
+* chemist preference
+
+### Tradeoff 3: Process scoring quality (weak labels can mislead)
+
+Rules can be wrong; learned ranker can overfit.
+
+**Test**:
+
+* collect small expert-labeled set (even 200–500 pairwise comparisons)
+* measure ranker agreement
+* iteratively refine features
+
+### Tradeoff 4: Adding conditions early can hurt
+
+Noisy condition labels will degrade reactant prediction.
+
+**Test**:
+
+* keep “conditions” as optional output; do not require it for correctness
+* only enable condition generation when you can validate it with structured data (ORD/ELN)
+
+---
+
+## 15) Concrete next step: what to code *tomorrow*
+
+If you want the most actionable immediate step, implement these three scripts:
+
+1. `extract_edits.py`
+
+* input: atom-mapped reaction SMILES
+* output: product SMILES + (reaction center bonds) + synthon SMILES + LG labels + edit tokens
+
+2. `candidate_generation.py`
+
+* input: product
+* run: graph head → K edits
+* run: LLM → N candidates per edit
+* output: list of `(reactants, edit, llm_score)`
+
+3. `verify_and_rank.py`
+
+* input: product + candidates
+* run: verifier ensemble
+* compute: ProcessScore v0
+* output: ranked candidates with explanations
+
+Once those exist, plugging into a planner is straightforward.
+
+---
+
+If you want, I can also give you:
+
+* a proposed **edit token specification** (exact grammar),
+* a **minimal forward verifier model spec** (transformer config, training objective),
+* and a **ProcessScore v0 rulebook template** (what categories to start with, how to weight them),
+  all aligned with the above pipeline.

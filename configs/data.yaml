@@ -1,0 +1,35 @@
+# Data preprocessing configuration
+
+dataset: uspto50k
+
+# Raw data paths (relative to project root)
+raw_dir: data/raw
+processed_dir: data/processed
+vocab_dir: data/vocab
+
+# USPTO-50K settings
+uspto50k:
+  url: "https://deepchemdata.s3.us-west-1.amazonaws.com/datasets/USPTO_50K.csv"
+  rxn_smiles_col: rxn_smiles
+  reaction_class_col: class
+
+# USPTO-FULL settings
+uspto_full:
+  url: "https://deepchemdata.s3.us-west-1.amazonaws.com/datasets/USPTO_FULL.csv"
+  rxn_smiles_col: rxn_smiles
+
+# Canonicalization
+canonicalize:
+  remove_atom_mapping: false  # Keep for edit extraction
+  remove_stereo: false
+  sort_components: true       # Longest first, then alphabetical
+
+# LG Vocabulary
+lg_vocab:
+  min_frequency: 2
+  max_vocab_size: 500
+
+# Edit dataset (for LLM fine-tuning)
+edit_dataset:
+  include_lg_hints: true
+  max_lg_options: 5

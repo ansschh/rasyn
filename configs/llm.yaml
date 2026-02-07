@@ -1,0 +1,27 @@
+# LLM (RSGPT) fine-tuning configuration
+dataset: uspto50k
+weights_path: weights/rsgpt/finetune_50k.pth
+
+# LoRA
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
+# Training (optimized for 1x A100 80GB)
+epochs: 3
+batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 0.00002
+warmup_ratio: 0.1
+max_length: 512
+bf16: true
+gradient_checkpointing: true
+
+# Saving
+save_steps: 500
+logging_steps: 50
+
+# Inference
+beam_size: 5
+candidates_per_edit: 5
+max_new_tokens: 256

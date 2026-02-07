@@ -1,0 +1,45 @@
+# ProcessScore v0 configuration
+
+# Sub-score weights (must sum to 1.0)
+weights:
+  safety: 0.30
+  scalability: 0.30
+  greenness: 0.15
+  confidence: 0.25
+
+# Safety scoring
+safety:
+  # Penalty per hazardous motif found
+  motif_penalty: 0.15
+  # Penalty per hazardous reagent used
+  reagent_penalty_high: 0.30
+  reagent_penalty_medium: 0.20
+  reagent_penalty_low: 0.10
+  # Penalty per hazardous solvent
+  solvent_penalty: 0.10
+
+# Scalability scoring
+scalability:
+  # Temperature penalties
+  cryo_threshold: -40    # Below this = cryogenic penalty
+  cryo_penalty: 0.25
+  high_temp_threshold: 200
+  high_temp_penalty: 0.15
+  # Pressure penalties
+  high_pressure_threshold: 10  # bar
+  high_pressure_penalty: 0.20
+  # Reagent sensitivity
+  sensitive_reagent_penalty: 0.20
+  # Protecting groups
+  protecting_group_penalty: 0.10
+
+# Greenness scoring
+greenness:
+  # Atom economy weight in greenness sub-score
+  atom_economy_weight: 0.4
+  # Solvent score weight
+  solvent_weight: 0.4
+  # Component count weight
+  component_weight: 0.2
+  # Max components before penalty
+  max_components: 5

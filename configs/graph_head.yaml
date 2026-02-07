@@ -1,0 +1,22 @@
+# Graph Edit Head training configuration
+dataset: uspto50k
+epochs: 100
+batch_size: 32
+lr: 0.001
+hidden_dim: 32
+n_mpnn_layers: 2
+patience: 15
+device: auto
+
+# Loss weights (Retro-MTGR: 0.6, 0.2, 0.2)
+w_bond: 0.6
+w_contrast: 0.2
+w_lg: 0.2
+
+# LG predictor
+use_cog: true
+lg_hidden_dim: 128
+top_m_lgs: 3
+
+# Inference
+top_k_bonds: 10
