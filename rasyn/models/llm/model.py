@@ -99,25 +99,20 @@ def load_rsgpt_model(
     else:
         logger.warning("No pretrained weights provided. Model initialized randomly.")
 
-    # Set up tokenizer (use LLaMA tokenizer as base)
-    # RSGPT uses BPE tokenization — we use the LLaMA tokenizer and add special tokens
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Llama-2-7b-hf",
-            use_fast=True,
-            trust_remote_code=True,
-        )
-    except Exception:
-        # Fallback: create a simple tokenizer
-        logger.warning("Could not load LLaMA tokenizer. Using GPT-2 tokenizer as fallback.")
+    # Load RSGPT's own BPE tokenizer (SMILES-specific, ~1072 base + added tokens)
+    tokenizer_path = Path(weights_path).parent / "tokenizer" if weights_path else None
+    if tokenizer_path and tokenizer_path.exists():
+        logger.info(f"Loading RSGPT tokenizer from {tokenizer_path}")
+        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+    else:
+        logger.warning("RSGPT tokenizer not found. Using GPT-2 tokenizer as fallback.")
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-    # Add special tokens for edit language
-    special_tokens_dict = {"additional_special_tokens": ALL_SPECIAL_TOKENS}
-    if tokenizer.pad_token is None:
-        special_tokens_dict["pad_token"] = "<PAD>"
-    num_added = tokenizer.add_special_tokens(special_tokens_dict)
-    logger.info(f"Added {num_added} special tokens to tokenizer")
+    # Add our edit-language special tokens (if not already present)
+    new_tokens = [t for t in ALL_SPECIAL_TOKENS if t not in tokenizer.get_vocab()]
+    if new_tokens:
+        tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+        logger.info(f"Added {len(new_tokens)} edit-language tokens to tokenizer")
 
     # Resize model embeddings to match new vocabulary
     model.resize_token_embeddings(len(tokenizer))
