@@ -147,7 +147,7 @@ def finetune_rsgpt(
         logging_steps=logging_steps,
         save_steps=save_steps,
         save_total_limit=3,
-        evaluation_strategy="steps" if val_dataset else "no",
+        eval_strategy="steps" if val_dataset else "no",
         eval_steps=save_steps if val_dataset else None,
         load_best_model_at_end=val_dataset is not None,
         report_to="none",
