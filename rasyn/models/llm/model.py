@@ -80,13 +80,16 @@ def load_rsgpt_model(
         elif "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
 
-        # Strip 'module.' prefix from DDP-saved weights
+        # RSGPT checkpoint has two sets of weights:
+        #   Set 1 (218 keys): module.embed_tokens.weight, module.layers.0... (no lm_head)
+        #   Set 2 (219 keys): module.model.model.embed_tokens.weight, ... + module.model.lm_head.weight
+        # Set 2 is the complete trained model. Strip "module.model." prefix to match
+        # HuggingFace LlamaForCausalLM keys (model.X + lm_head.weight).
         cleaned = {}
         for k, v in state_dict.items():
-            if k.startswith("module."):
-                cleaned["model." + k[len("module."):]] = v
-            else:
-                cleaned[k] = v
+            if k.startswith("module.model."):
+                new_k = k[len("module.model."):]  # module.model.model.X -> model.X, module.model.lm_head -> lm_head
+                cleaned[new_k] = v
         state_dict = cleaned
 
         # Try loading with strict=False to handle architecture mismatches
@@ -99,7 +102,10 @@ def load_rsgpt_model(
     else:
         logger.warning("No pretrained weights provided. Model initialized randomly.")
 
-    # Load RSGPT's own BPE tokenizer (SMILES-specific, ~1072 base + added tokens)
+    # Load RSGPT's own BPE tokenizer (SMILES-specific, 1000 base + 4333 added tokens).
+    # The checkpoint has embed_tokens [1000, 2048]. After loading weights, we resize
+    # to match the full tokenizer. The new positions are initialized from the pretrained
+    # weight distribution (mean_resizing) so they start in a reasonable range.
     tokenizer_path = Path(weights_path).parent / "tokenizer" if weights_path else None
     if tokenizer_path and tokenizer_path.exists():
         logger.info(f"Loading RSGPT tokenizer from {tokenizer_path}")
@@ -114,7 +120,9 @@ def load_rsgpt_model(
         tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
         logger.info(f"Added {len(new_tokens)} edit-language tokens to tokenizer")
 
-    # Resize model embeddings to match new vocabulary
+    # Resize model embeddings to match tokenizer
+    # (1000 pretrained -> len(tokenizer), new rows initialized from pretrained stats)
+    logger.info(f"Resizing embeddings: {config.vocab_size} -> {len(tokenizer)}")
     model.resize_token_embeddings(len(tokenizer))
 
     # Add LoRA if requested
