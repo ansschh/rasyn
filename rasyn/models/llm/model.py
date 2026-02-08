@@ -51,10 +51,11 @@ def load_rsgpt_model(
     from rasyn.models.llm.tokenizer import ALL_SPECIAL_TOKENS
 
     # RSGPT architecture config (from paper: 24-layer LLaMA2)
+    # vocab_size=1000 is RSGPT's SMILES vocabulary; will be resized after adding special tokens
     config = LlamaConfig(
-        vocab_size=32000,  # Will be resized after adding special tokens
+        vocab_size=1000,
         hidden_size=2048,
-        intermediate_size=5504,  # Standard for LLaMA2 with 2048 hidden
+        intermediate_size=8192,  # 4 * hidden_size, matches RSGPT checkpoint
         num_hidden_layers=24,
         num_attention_heads=32,
         max_position_embeddings=2048,
@@ -78,6 +79,15 @@ def load_rsgpt_model(
             state_dict = state_dict["model_state_dict"]
         elif "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
+
+        # Strip 'module.' prefix from DDP-saved weights
+        cleaned = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                cleaned["model." + k[len("module."):]] = v
+            else:
+                cleaned[k] = v
+        state_dict = cleaned
 
         # Try loading with strict=False to handle architecture mismatches
         missing, unexpected = model.load_state_dict(state_dict, strict=False)

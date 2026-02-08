@@ -15,6 +15,7 @@ import click
 import pandas as pd
 from tqdm import tqdm
 
+from rasyn.preprocess.atom_mapping import has_atom_mapping, map_reactions_batch
 from rasyn.preprocess.build_edit_dataset import build_edit_dataset
 from rasyn.preprocess.build_lg_cog import build_lg_cooccurrence, save_lg_cog
 from rasyn.preprocess.build_lg_vocab import (
@@ -113,6 +114,19 @@ def main(dataset, raw_dir, output_dir, vocab_dir, build_vocab_from):
     logger.info(f"Loading {csv_path}...")
     df = load_uspto_csv(csv_path)
     logger.info(f"Loaded {len(df)} reactions")
+
+    # Step 1.5: Add atom mapping if missing
+    sample_rxn = str(df["rxn_smiles"].iloc[0])
+    if not has_atom_mapping(sample_rxn.split(">>")[0]):
+        logger.info("Reactions lack atom mapping. Running atom mapper...")
+        all_rxns = df["rxn_smiles"].tolist()
+        mapped = map_reactions_batch(all_rxns, batch_size=10)
+        mapped_count = sum(1 for m in mapped if m is not None)
+        logger.info(f"Atom mapping complete: {mapped_count}/{len(all_rxns)} mapped")
+        df["rxn_smiles_original"] = df["rxn_smiles"]
+        df["rxn_smiles"] = [m if m else orig for m, orig in zip(mapped, all_rxns)]
+    else:
+        logger.info("Reactions already have atom mapping")
 
     # Step 2: Extract edits for all reactions
     logger.info("Extracting edits from all reactions...")
