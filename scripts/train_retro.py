@@ -398,7 +398,17 @@ def generate_samples(model, dataset, tokenizer, device, n=5):
         tgt_str = tokenizer.decode(tgt_ids.tolist())
         src_str = tokenizer.decode(item["src_ids"].tolist())
 
-        match = "EXACT" if pred_str == tgt_str else "wrong"
+        valid = check_validity(pred_str) if pred_str else False
+        if pred_str == tgt_str:
+            match = "EXACT"
+        elif valid:
+            # Check canonical match
+            pred_c = canonicalize_and_sort(pred_str)
+            tgt_c = canonicalize_and_sort(tgt_str)
+            match = "CANON" if (pred_c and tgt_c and pred_c == tgt_c) else "valid"
+        else:
+            match = "invalid"
+
         samples.append({
             "src": src_str[:80],
             "pred": pred_str[:80],
@@ -410,8 +420,50 @@ def generate_samples(model, dataset, tokenizer, device, n=5):
     return samples
 
 
+def is_valid_smiles(smi: str) -> bool:
+    """Check if a SMILES string is valid (parseable by RDKit)."""
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smi.strip())
+        return mol is not None
+    except Exception:
+        return False
+
+
+def check_validity(smiles_str: str) -> bool:
+    """Check if all components in a multi-component SMILES are valid."""
+    parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if not is_valid_smiles(p):
+            return False
+    return len(parts) > 0
+
+
+def canonicalize_and_sort(smiles_str: str) -> str:
+    """Canonicalize and sort multi-component SMILES for fair comparison."""
+    try:
+        from rdkit import Chem
+        parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
+        canon = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            mol = Chem.MolFromSmiles(p)
+            if mol is not None:
+                canon.append(Chem.MolToSmiles(mol))
+        if canon:
+            return ".".join(sorted(canon))
+    except Exception:
+        pass
+    return ""
+
+
 def evaluate(model, val_loader, tokenizer, device):
-    """Run full validation: loss, token accuracy, exact match."""
+    """Run full validation: loss, token accuracy, exact match, validity rate."""
     model.eval()
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
@@ -419,6 +471,8 @@ def evaluate(model, val_loader, tokenizer, device):
     total_correct = 0
     total_tokens = 0
     total_exact = 0
+    total_canon_exact = 0  # Canonical exact match (fairer comparison)
+    total_valid = 0  # Valid SMILES predictions
     total_examples = 0
     n_batches = 0
 
@@ -450,8 +504,21 @@ def evaluate(model, val_loader, tokenizer, device):
             for i, pred_ids in enumerate(pred_ids_list):
                 pred_str = tokenizer.decode(pred_ids)
                 tgt_str = tokenizer.decode(tgt_ids[i].tolist())
+
+                # String exact match
                 if pred_str == tgt_str:
                     total_exact += 1
+
+                # Validity check
+                if check_validity(pred_str):
+                    total_valid += 1
+
+                # Canonical exact match (fairer — handles different SMILES orderings)
+                pred_canon = canonicalize_and_sort(pred_str)
+                tgt_canon = canonicalize_and_sort(tgt_str)
+                if pred_canon and tgt_canon and pred_canon == tgt_canon:
+                    total_canon_exact += 1
+
                 total_examples += 1
 
     model.train()
@@ -460,6 +527,8 @@ def evaluate(model, val_loader, tokenizer, device):
         "val_loss": total_loss / max(n_batches, 1),
         "val_token_acc": total_correct / max(total_tokens, 1),
         "val_exact_match": total_exact / max(total_examples, 1),
+        "val_canon_exact": total_canon_exact / max(total_examples, 1),
+        "val_validity_rate": total_valid / max(total_examples, 1),
         "val_examples": total_examples,
     }
 
@@ -596,12 +665,14 @@ def train(
         # Validation
         if val_loader is not None and epoch % eval_every_epoch == 0:
             val_metrics = evaluate(model, val_loader, tokenizer, device)
+            n_exact = int(val_metrics['val_exact_match'] * val_metrics['val_examples'])
+            n_canon = int(val_metrics['val_canon_exact'] * val_metrics['val_examples'])
             logger.info(
                 f"  VAL: loss={val_metrics['val_loss']:.4f} | "
                 f"token_acc={val_metrics['val_token_acc']:.4f} | "
-                f"exact_match={val_metrics['val_exact_match']:.4f} "
-                f"({int(val_metrics['val_exact_match'] * val_metrics['val_examples'])}"
-                f"/{val_metrics['val_examples']})"
+                f"exact_match={val_metrics['val_exact_match']:.4f} ({n_exact}/{val_metrics['val_examples']}) | "
+                f"canon_match={val_metrics['val_canon_exact']:.4f} ({n_canon}/{val_metrics['val_examples']}) | "
+                f"validity={val_metrics['val_validity_rate']:.4f}"
             )
 
             # Save best model

@@ -59,14 +59,26 @@ def randomize_smiles(smiles: str) -> str:
     return smiles
 
 
-def randomize_multi_smiles(smiles_str: str, separator: str = " . ") -> str:
-    """Randomize each component in a multi-component SMILES string."""
+def randomize_multi_smiles(
+    smiles_str: str,
+    separator: str = " . ",
+    shuffle_order: bool = False,
+) -> str:
+    """Randomize each component in a multi-component SMILES string.
+
+    Args:
+        smiles_str: Dot-separated SMILES.
+        separator: Component separator.
+        shuffle_order: If True, randomly permute component order.
+    """
     parts = smiles_str.split(separator)
     randomized = []
     for part in parts:
         part = part.strip()
         if part:
             randomized.append(randomize_smiles(part))
+    if shuffle_order:
+        random.shuffle(randomized)
     return separator.join(randomized)
 
 
@@ -138,12 +150,12 @@ class RetroDataset(Dataset):
         synthons = ex["synthons"]
         reactants = ex["reactants"]
 
-        # SMILES augmentation: random non-canonical SMILES
+        # SMILES augmentation: random non-canonical SMILES + order shuffling
         if self.augment:
             product = randomize_smiles(product)
-            reactants = randomize_multi_smiles(reactants)
+            reactants = randomize_multi_smiles(reactants, shuffle_order=True)
             if synthons:
-                synthons = randomize_multi_smiles(synthons)
+                synthons = randomize_multi_smiles(synthons, shuffle_order=True)
 
         # Conditioning dropout: sometimes drop synthon conditioning
         use_conditioning = synthons and (random.random() > self.conditioning_dropout)

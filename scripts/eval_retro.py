@@ -41,12 +41,34 @@ def canonicalize_smiles(smi: str) -> str:
     return ""
 
 
+def is_valid_smiles(smi: str) -> bool:
+    """Check if a SMILES string is valid (parseable by RDKit)."""
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smi.strip())
+        return mol is not None
+    except Exception:
+        return False
+
+
 def normalize_reactants(smiles_str: str) -> str:
     """Canonicalize and sort reactant SMILES for comparison."""
     parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
     canon = [canonicalize_smiles(p) for p in parts if p.strip()]
     canon = [c for c in canon if c]
     return ".".join(sorted(canon))
+
+
+def check_all_components_valid(smiles_str: str) -> bool:
+    """Check if every component in a multi-component SMILES is valid."""
+    parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if not is_valid_smiles(p):
+            return False
+    return len(parts) > 0
 
 
 @click.command()
@@ -91,6 +113,8 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
     total = 0
     invalid = 0
     valid_smiles_count = 0
+    all_valid_count = 0  # Predictions where ALL components are valid SMILES
+    total_predictions = 0
     start = time.time()
 
     for i, ex in enumerate(tqdm(examples, desc="Evaluating")):
@@ -129,6 +153,12 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
         predictions = []
         for token_ids, score in beam_results:
             pred_str = tokenizer.decode(token_ids)
+            total_predictions += 1
+
+            # Check if ALL components are valid SMILES
+            if check_all_components_valid(pred_str):
+                all_valid_count += 1
+
             norm = normalize_reactants(pred_str)
             if norm:
                 valid_smiles_count += 1
@@ -150,17 +180,22 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
         # Periodic logging
         if (i + 1) % 100 == 0:
             elapsed = time.time() - start
+            validity_rate = all_valid_count / max(total_predictions, 1) * 100
             logger.info(
                 f"Step {i+1}/{len(examples)} | "
                 f"Top-1: {top1/total:.4f} | Top-3: {top3/total:.4f} | "
                 f"Top-5: {top5/total:.4f} | "
-                f"Valid: {valid_smiles_count}/{valid_smiles_count+invalid} | "
+                f"Valid SMILES: {validity_rate:.1f}% | "
+                f"Canon rate: {valid_smiles_count}/{valid_smiles_count+invalid} | "
                 f"{(i+1)/elapsed:.1f} samples/s"
             )
 
     elapsed = time.time() - start
 
     # Results
+    validity_rate = all_valid_count / max(total_predictions, 1)
+    canon_rate = valid_smiles_count / max(valid_smiles_count + invalid, 1)
+
     print("\n" + "=" * 60)
     print("RETROTRANSFORMER EVALUATION RESULTS")
     print("=" * 60)
@@ -168,10 +203,15 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
     print(f"Samples: {total}")
     print(f"Conditioned: {conditioned}")
     print(f"Beam size: {beam_size}")
-    print(f"Valid SMILES: {valid_smiles_count}/{valid_smiles_count+invalid} "
-          f"({valid_smiles_count/max(valid_smiles_count+invalid,1)*100:.1f}%)")
     print(f"Time: {elapsed:.1f}s ({total/elapsed:.1f} samples/s)")
     print()
+    print("--- Validity Metrics ---")
+    print(f"  SMILES validity rate:  {validity_rate*100:.1f}% "
+          f"({all_valid_count}/{total_predictions} predictions have all components valid)")
+    print(f"  Canonicalization rate: {canon_rate*100:.1f}% "
+          f"({valid_smiles_count}/{valid_smiles_count+invalid} predictions canonicalize)")
+    print()
+    print("--- Accuracy Metrics ---")
     print(f"  Top-1 accuracy: {top1/max(total,1):.4f} ({top1}/{total})")
     print(f"  Top-3 accuracy: {top3/max(total,1):.4f} ({top3}/{total})")
     print(f"  Top-5 accuracy: {top5/max(total,1):.4f} ({top5}/{total})")
@@ -184,7 +224,10 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
         "top1": top1 / max(total, 1),
         "top3": top3 / max(total, 1),
         "top5": top5 / max(total, 1),
-        "valid_smiles_rate": valid_smiles_count / max(valid_smiles_count + invalid, 1),
+        "smiles_validity_rate": validity_rate,
+        "canonicalization_rate": canon_rate,
+        "total_predictions": total_predictions,
+        "all_valid_predictions": all_valid_count,
         "conditioned": conditioned,
         "beam_size": beam_size,
     }
