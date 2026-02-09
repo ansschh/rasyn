@@ -157,9 +157,11 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
             # Extract text after <OUT>
             if "<OUT>" in text:
                 completion = text.split("<OUT>")[-1]
-                # Clean up: remove </s>, <EOS>, etc.
+                # Clean up: remove </s>, <EOS>, <unk>, etc.
                 for stop in ["</s>", "<EOS>", "<pad>", "<PAD>"]:
                     completion = completion.split(stop)[0]
+                # Strip <unk> tokens (BPE space artifacts)
+                completion = completion.replace("<unk>", "")
                 completion = completion.strip()
             else:
                 completion = ""

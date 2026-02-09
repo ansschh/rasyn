@@ -157,6 +157,8 @@ def generate_reactants(
 
     for i, output_ids in enumerate(outputs):
         generated_text = tokenizer.decode(output_ids, skip_special_tokens=False)
+        # Strip <unk> tokens (BPE space artifacts from training tokenization)
+        generated_text = generated_text.replace("<unk>", "")
         reactants_str = extract_completion(generated_text)
 
         # Parse individual reactant SMILES
