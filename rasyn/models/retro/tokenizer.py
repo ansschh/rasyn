@@ -21,15 +21,17 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Default SMILES character set (covers USPTO-50K + common organic chemistry)
+# Includes ALL lowercase letters (for Cl, Br, Si, Se, As, Te, etc.)
 DEFAULT_SMILES_CHARS = list(
-    "CNOSFPIBHKcnosp"  # Atoms (upper/lower)
-    "()[]"              # Grouping
-    "=#@+-\\/.:"        # Bonds and stereochemistry
-    "0123456789"        # Ring numbers, charges
-    "%"                 # Multi-digit ring numbers
-    "*"                 # Dummy atoms in synthons [1*]
-    " "                 # Space in multi-component SMILES (reactant1 . reactant2)
-    "|"                 # Conditioning separator
+    "CNOSPFIBHK"                 # Common uppercase atoms
+    "abcdefghijklmnopqrstuvwxyz" # All lowercase (Cl, Br, Si, Se, aromatic, etc.)
+    "()[]"                       # Grouping
+    "=#@+-\\/.:"                 # Bonds and stereochemistry
+    "0123456789"                 # Ring numbers, charges
+    "%"                          # Multi-digit ring numbers
+    "*"                          # Dummy atoms in synthons [1*]
+    " "                          # Space in multi-component SMILES
+    "|"                          # Conditioning separator
 )
 
 SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
