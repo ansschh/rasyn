@@ -136,6 +136,11 @@ def load_rsgpt_model(
             lora_dropout=lora_dropout,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
             bias="none",
+            # Save embed_tokens and lm_head with the adapter so that the
+            # resized embedding rows (for edit tokens) are preserved across
+            # training and inference.  Without this, resize_token_embeddings
+            # produces different random values each time, breaking eval.
+            modules_to_save=["embed_tokens", "lm_head"],
         )
         model = get_peft_model(model, lora_config)
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
