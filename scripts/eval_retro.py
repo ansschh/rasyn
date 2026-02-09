@@ -80,8 +80,10 @@ def check_all_components_valid(smiles_str: str) -> bool:
 @click.option("--max-len", default=256, type=int)
 @click.option("--conditioned/--unconditioned", default=True,
               help="Use synthon conditioning or product-only")
+@click.option("--forward-checkpoint", default=None,
+              help="Optional forward model checkpoint for round-trip verification")
 @click.option("--device", default="auto")
-def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, device):
+def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, forward_checkpoint, device):
     """Evaluate RetroTransformer."""
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,11 +91,21 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
     checkpoint_path = PROJECT_ROOT / checkpoint
     data_path = PROJECT_ROOT / data
 
-    # Load model
-    logger.info(f"Loading model from {checkpoint_path}...")
+    # Load retro model
+    logger.info(f"Loading retro model from {checkpoint_path}...")
     from rasyn.models.retro.model import load_retro_model
     model, tokenizer = load_retro_model(str(checkpoint_path), device=device)
-    logger.info(f"Model loaded on {device}")
+    logger.info(f"Retro model loaded on {device}")
+
+    # Optionally load forward model for round-trip verification
+    fwd_model = None
+    fwd_tokenizer = None
+    if forward_checkpoint:
+        fwd_path = PROJECT_ROOT / forward_checkpoint
+        logger.info(f"Loading forward model from {fwd_path}...")
+        from rasyn.models.forward.model import load_forward_model
+        fwd_model, fwd_tokenizer = load_forward_model(str(fwd_path), device=device)
+        logger.info("Forward model loaded for round-trip verification")
 
     # Load data
     import re
@@ -115,6 +127,8 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
     valid_smiles_count = 0
     all_valid_count = 0  # Predictions where ALL components are valid SMILES
     total_predictions = 0
+    fwd_pass_count = 0  # Forward model round-trip passes
+    fwd_checked_count = 0  # Number of predictions checked with forward model
     start = time.time()
 
     for i, ex in enumerate(tqdm(examples, desc="Evaluating")):
@@ -169,6 +183,31 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
 
         total += 1
 
+        # Forward model round-trip verification (on top-1 prediction only)
+        if fwd_model and predictions:
+            top1_reactants = predictions[0]
+            fwd_checked_count += 1
+            try:
+                # Run forward model: reactants -> predicted product
+                fwd_src = top1_reactants.replace(".", " . ")
+                fwd_src_ids = torch.tensor(
+                    [fwd_tokenizer.encode(fwd_src, max_len=512)],
+                    dtype=torch.long, device=device,
+                )
+                fwd_pred_ids = fwd_model.generate_greedy(
+                    fwd_src_ids,
+                    bos_token_id=fwd_tokenizer.bos_token_id,
+                    eos_token_id=fwd_tokenizer.eos_token_id,
+                    max_len=256,
+                )[0]
+                fwd_pred_str = fwd_tokenizer.decode(fwd_pred_ids)
+                fwd_pred_canon = canonicalize_smiles(fwd_pred_str)
+                product_canon = canonicalize_smiles(product)
+                if fwd_pred_canon and product_canon and fwd_pred_canon == product_canon:
+                    fwd_pass_count += 1
+            except Exception:
+                pass
+
         # Check accuracy
         if predictions and predictions[0] == gt:
             top1 += 1
@@ -215,6 +254,11 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
     print(f"  Top-1 accuracy: {top1/max(total,1):.4f} ({top1}/{total})")
     print(f"  Top-3 accuracy: {top3/max(total,1):.4f} ({top3}/{total})")
     print(f"  Top-5 accuracy: {top5/max(total,1):.4f} ({top5}/{total})")
+    if fwd_checked_count > 0:
+        fwd_rate = fwd_pass_count / fwd_checked_count
+        print()
+        print("--- Forward Verifier Round-trip ---")
+        print(f"  Pass rate: {fwd_rate*100:.1f}% ({fwd_pass_count}/{fwd_checked_count})")
     print("=" * 60)
 
     # Save
@@ -230,6 +274,8 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, conditioned, d
         "all_valid_predictions": all_valid_count,
         "conditioned": conditioned,
         "beam_size": beam_size,
+        "fwd_pass_rate": fwd_pass_count / max(fwd_checked_count, 1) if fwd_checked_count > 0 else None,
+        "fwd_checked": fwd_checked_count,
     }
     results_file = checkpoint_path.parent / "eval_results.json"
     with open(results_file, "w") as f:
