@@ -74,6 +74,7 @@ class EditConditionedDataset(Dataset):
 
         labels = input_ids.clone()
         labels[:prompt_length] = -100  # Ignore prompt in loss computation
+        labels[attention_mask == 0] = -100  # Ignore padding in loss computation
 
         return {
             "input_ids": input_ids,
