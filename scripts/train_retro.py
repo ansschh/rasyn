@@ -196,7 +196,9 @@ def sanity_check_overfit(
     loader = DataLoader(fixed_dataset, batch_size=min(n, 32), shuffle=True)
 
     model.train()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # Use SGD with momentum for overfit test — Adam gets stuck in mode collapse
+    # on small datasets with large Transformers (see debug_overfit.py results)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
     best_acc = 0.0
@@ -214,6 +216,7 @@ def sanity_check_overfit(
 
             optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
         # Check accuracy every 50 epochs
