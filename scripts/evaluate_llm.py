@@ -19,6 +19,8 @@ import click
 import torch
 from tqdm import tqdm
 
+from rasyn.models.llm.generate import tokenize_prompt_for_inference
+
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -132,13 +134,10 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
         if not gt_normalized:
             continue
 
-        # Tokenize prompt
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-        ).to(device)
+        # Tokenize prompt — match training BPE at the <OUT> boundary
+        inputs = tokenize_prompt_for_inference(
+            prompt, tokenizer, max_length=512, device=device,
+        )
 
         # Generate with beam search
         with torch.no_grad():

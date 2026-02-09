@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # Load model
 print("Loading model...")
 from rasyn.models.llm.model import load_rsgpt_model
+from rasyn.models.llm.generate import tokenize_prompt_for_inference
 from peft import PeftModel
 from transformers import AutoTokenizer
 
@@ -42,8 +43,9 @@ for i, ex in enumerate(examples):
     print(f"PROMPT: {prompt[:150]}...")
     print(f"GROUND TRUTH: {gt}")
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(device)
-    print(f"Input token IDs (first 20): {inputs['input_ids'][0][:20].tolist()}")
+    # Use inference-safe tokenization that matches training BPE
+    inputs = tokenize_prompt_for_inference(prompt, tokenizer, max_length=512, device=device)
+    print(f"Input token IDs (last 5): {inputs['input_ids'][0][-5:].tolist()}")
     print(f"Input length: {inputs['input_ids'].shape[1]}")
 
     with torch.no_grad():

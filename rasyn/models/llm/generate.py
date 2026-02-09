@@ -21,6 +21,57 @@ from rasyn.schema import EditHypothesis, StepCandidate
 logger = logging.getLogger(__name__)
 
 
+def tokenize_prompt_for_inference(
+    prompt: str,
+    tokenizer,
+    max_length: int = 512,
+    device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    """Tokenize a prompt for inference, matching training BPE tokenization.
+
+    During training, the full text ``prompt + " " + completion + eos`` is
+    tokenized as a single string.  The space between ``<OUT>`` and the first
+    completion token becomes ``<unk>`` (token 3).  Tokenizing the prompt *alone*
+    causes the tokenizer to auto-append ``</s>`` instead, which the model has
+    never seen at that position — leading it to generate ``</s>`` immediately.
+
+    Fix: tokenize ``prompt + " X"`` (with a dummy suffix so the space is not
+    trailing) and keep only the tokens through ``<OUT>`` + the space token.
+    """
+    out_token_id = tokenizer.convert_tokens_to_ids("<OUT>")
+
+    # Tokenize with a dummy completion so the space after <OUT> gets a real token
+    dummy_text = f"{prompt} X"
+    dummy_enc = tokenizer(
+        dummy_text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_length,
+    )
+    dummy_ids = dummy_enc["input_ids"][0]
+
+    # Find the last <OUT> token position
+    out_positions = (dummy_ids == out_token_id).nonzero(as_tuple=True)[0]
+
+    if len(out_positions) > 0:
+        # Keep everything through <OUT> + 1 (the space token after it)
+        prompt_end = out_positions[-1].item() + 2
+    else:
+        # Fallback: strip trailing EOS from regular prompt encoding
+        prompt_enc = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
+        prompt_end = prompt_enc["input_ids"].shape[1]
+        if prompt_end > 0 and prompt_enc["input_ids"][0, -1].item() == tokenizer.eos_token_id:
+            prompt_end -= 1
+
+    input_ids = dummy_ids[:prompt_end].unsqueeze(0)
+    attention_mask = torch.ones_like(input_ids)
+
+    return {
+        "input_ids": input_ids.to(device),
+        "attention_mask": attention_mask.to(device),
+    }
+
+
 def generate_reactants(
     model,
     tokenizer,
@@ -73,14 +124,10 @@ def generate_reactants(
         # Unconditioned generation (no edit)
         prompt = f"<PROD> {product_smiles} <OUT>"
 
-    # Tokenize
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512,
-    ).to(device)
+    # Tokenize — use the inference-safe tokenizer that matches training BPE
+    inputs = tokenize_prompt_for_inference(
+        prompt, tokenizer, max_length=512, device=device,
+    )
 
     # Generate
     with torch.no_grad():
