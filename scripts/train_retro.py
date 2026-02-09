@@ -174,9 +174,26 @@ def sanity_check_overfit(
     logger.info(f"SANITY CHECK: Overfit {n_examples} examples for {n_epochs} epochs")
     logger.info("=" * 60)
 
-    # Create small subset
-    subset = Subset(dataset, list(range(min(n_examples, len(dataset)))))
-    loader = DataLoader(subset, batch_size=min(n_examples, 32), shuffle=True)
+    # Pre-cache examples with augmentation DISABLED so they're deterministic
+    # (augmented SMILES change every access, making memorization impossible)
+    n = min(n_examples, len(dataset))
+    cached_src = []
+    cached_tgt = []
+    for i in range(n):
+        item = dataset[i]
+        cached_src.append(item["src_ids"])
+        cached_tgt.append(item["tgt_ids"])
+    fixed_src = torch.stack(cached_src)
+    fixed_tgt = torch.stack(cached_tgt)
+
+    logger.info(f"  Pre-cached {n} examples (frozen — no augmentation during overfit)")
+    # Log a sample to verify
+    logger.info(f"  Sample src: {tokenizer.decode(cached_src[0].tolist())[:80]}")
+    logger.info(f"  Sample tgt: {tokenizer.decode(cached_tgt[0].tolist())[:80]}")
+
+    from torch.utils.data import TensorDataset
+    fixed_dataset = TensorDataset(fixed_src, fixed_tgt)
+    loader = DataLoader(fixed_dataset, batch_size=min(n, 32), shuffle=True)
 
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -186,8 +203,8 @@ def sanity_check_overfit(
 
     for epoch in range(n_epochs):
         for batch in loader:
-            src_ids = batch["src_ids"].to(device)
-            tgt_ids = batch["tgt_ids"].to(device)
+            src_ids = batch[0].to(device)
+            tgt_ids = batch[1].to(device)
 
             tgt_input = tgt_ids[:, :-1]
             tgt_target = tgt_ids[:, 1:]
@@ -206,8 +223,8 @@ def sanity_check_overfit(
             total = 0
 
             for batch in loader:
-                src_ids = batch["src_ids"].to(device)
-                tgt_ids = batch["tgt_ids"].to(device)
+                src_ids = batch[0].to(device)
+                tgt_ids = batch[1].to(device)
 
                 tgt_input = tgt_ids[:, :-1]
                 tgt_target = tgt_ids[:, 1:]
@@ -230,8 +247,8 @@ def sanity_check_overfit(
             if (epoch + 1) % 100 == 0 or epoch == n_epochs - 1:
                 exact = 0
                 for batch in loader:
-                    src_ids = batch["src_ids"].to(device)
-                    tgt_ids = batch["tgt_ids"].to(device)
+                    src_ids = batch[0].to(device)
+                    tgt_ids = batch[1].to(device)
 
                     preds_list = model.generate_greedy(
                         src_ids,
@@ -248,7 +265,7 @@ def sanity_check_overfit(
                             logger.info(f"    Pred: {pred_str[:80]}")
                             logger.info(f"    True: {tgt_str[:80]}")
 
-                logger.info(f"  Exact match: {exact}/{min(n_examples, len(dataset))}")
+                logger.info(f"  Exact match: {exact}/{n}")
 
             model.train()
 
