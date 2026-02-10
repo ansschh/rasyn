@@ -38,6 +38,7 @@ SMILES_REGEX = re.compile(
     r"|@@|@"             # Stereo markers (check @@ before @)
     r"|%\d{2}"           # Multi-digit ring: %10, %11, etc.
     r"|[A-Z][a-z]?"      # Single-letter atoms: C, N, O, Si, Se, etc.
+    r"|[a-z]"            # Aromatic atoms: c, n, o, s, p, b, etc.
     r"|[^A-Za-z])"       # Everything else: (, ), =, #, ., +, -, digits, etc.
 )
 
