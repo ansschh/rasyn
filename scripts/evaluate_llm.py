@@ -51,18 +51,22 @@ def normalize_reactants(smiles_str: str) -> str:
 @click.command()
 @click.option("--checkpoint", default="checkpoints/llm/uspto50k/final",
               help="Path to fine-tuned model checkpoint directory")
-@click.option("--data", default="data/processed/uspto50k/edit_conditioned_train.jsonl",
+@click.option("--data", default="data/processed/uspto50k/edit_conditioned_test.jsonl",
               help="Path to evaluation data (JSONL with prompt/completion)")
 @click.option("--max-samples", default=500, type=int,
               help="Maximum number of samples to evaluate")
-@click.option("--num-beams", default=5, type=int,
-              help="Beam size for generation")
+@click.option("--num-beams", default=10, type=int,
+              help="Total beam size for generation")
+@click.option("--num-beam-groups", default=5, type=int,
+              help="Number of beam groups for diverse beam search (1=standard)")
+@click.option("--diversity-penalty", default=1.0, type=float,
+              help="Diversity penalty for diverse beam search (0.0=no penalty)")
 @click.option("--max-new-tokens", default=256, type=int,
               help="Maximum new tokens to generate")
 @click.option("--skip", default=0, type=int,
               help="Skip first N samples (to evaluate on unseen tail)")
 @click.option("--device", default="auto")
-def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device):
+def main(checkpoint, data, max_samples, num_beams, num_beam_groups, diversity_penalty, max_new_tokens, skip, device):
     """Evaluate fine-tuned LLM on edit-conditioned retrosynthesis."""
     logging.basicConfig(
         level=logging.INFO,
@@ -121,8 +125,10 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
     top1_correct = 0
     top3_correct = 0
     top5_correct = 0
+    top10_correct = 0
     total = 0
     invalid_count = 0
+    total_unique_preds = 0
 
     start_time = time.time()
 
@@ -139,16 +145,21 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
             prompt, tokenizer, max_length=512, device=device,
         )
 
-        # Generate with beam search
+        # Generate with diverse beam search
         with torch.no_grad():
-            outputs = model.generate(
+            gen_kwargs = dict(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
-                num_return_sequences=min(num_beams, 5),
+                num_return_sequences=min(num_beams, 10),
                 early_stopping=True,
                 pad_token_id=tokenizer.pad_token_id,
             )
+            # Use diverse beam search when num_beam_groups > 1
+            if num_beam_groups > 1:
+                gen_kwargs["num_beam_groups"] = num_beam_groups
+                gen_kwargs["diversity_penalty"] = diversity_penalty
+            outputs = model.generate(**gen_kwargs)
 
         # Decode and extract completions
         predictions = []
@@ -184,6 +195,7 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
                 unique_preds.append(p)
 
         total += 1
+        total_unique_preds += len(unique_preds)
 
         # Check top-k accuracy
         if len(unique_preds) >= 1 and unique_preds[0] == gt_normalized:
@@ -192,20 +204,26 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
             top3_correct += 1
         if gt_normalized in unique_preds[:5]:
             top5_correct += 1
+        if gt_normalized in unique_preds[:10]:
+            top10_correct += 1
 
         # Print periodic progress
         if (i + 1) % 50 == 0:
             elapsed = time.time() - start_time
             rate = (i + 1) / elapsed
+            avg_unique = total_unique_preds / total
             logger.info(
                 f"Step {i+1}/{len(examples)} | "
                 f"Top-1: {top1_correct/total:.3f} | "
                 f"Top-3: {top3_correct/total:.3f} | "
                 f"Top-5: {top5_correct/total:.3f} | "
+                f"Top-10: {top10_correct/total:.3f} | "
+                f"Diversity: {avg_unique:.1f} | "
                 f"Rate: {rate:.1f} samples/s"
             )
 
     elapsed = time.time() - start_time
+    avg_diversity = total_unique_preds / max(total, 1)
 
     # Print results
     print("\n" + "=" * 60)
@@ -214,12 +232,15 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
     print(f"Checkpoint: {checkpoint}")
     print(f"Data: {data}")
     print(f"Samples evaluated: {total}")
+    print(f"Beam config: {num_beams} beams, {num_beam_groups} groups, penalty={diversity_penalty}")
     print(f"Invalid generations: {invalid_count}")
+    print(f"Avg unique predictions per sample: {avg_diversity:.1f}")
     print(f"Time: {elapsed:.1f}s ({total/elapsed:.1f} samples/s)")
     print()
-    print(f"  Top-1 accuracy: {top1_correct/max(total,1):.4f} ({top1_correct}/{total})")
-    print(f"  Top-3 accuracy: {top3_correct/max(total,1):.4f} ({top3_correct}/{total})")
-    print(f"  Top-5 accuracy: {top5_correct/max(total,1):.4f} ({top5_correct}/{total})")
+    print(f"  Top-1 accuracy:  {top1_correct/max(total,1):.4f} ({top1_correct}/{total})")
+    print(f"  Top-3 accuracy:  {top3_correct/max(total,1):.4f} ({top3_correct}/{total})")
+    print(f"  Top-5 accuracy:  {top5_correct/max(total,1):.4f} ({top5_correct}/{total})")
+    print(f"  Top-10 accuracy: {top10_correct/max(total,1):.4f} ({top10_correct}/{total})")
     print("=" * 60)
 
     # Save results
@@ -227,9 +248,14 @@ def main(checkpoint, data, max_samples, num_beams, max_new_tokens, skip, device)
         "checkpoint": str(checkpoint),
         "data": str(data),
         "total": total,
+        "num_beams": num_beams,
+        "num_beam_groups": num_beam_groups,
+        "diversity_penalty": diversity_penalty,
         "top1": top1_correct / max(total, 1),
         "top3": top3_correct / max(total, 1),
         "top5": top5_correct / max(total, 1),
+        "top10": top10_correct / max(total, 1),
+        "avg_diversity": avg_diversity,
         "invalid_count": invalid_count,
         "elapsed_seconds": elapsed,
     }

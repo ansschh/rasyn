@@ -445,11 +445,44 @@ class RetroTransformerV2(nn.Module):
 
                 # Expand scores
                 next_scores = active_scores.unsqueeze(1) + last_log_probs
-                next_scores = next_scores.view(-1)
+                # next_scores: (n_active, vocab)
 
-                # Top-k from active beams
-                k = min(beam_size, next_scores.numel())
-                topk_scores, topk_flat = next_scores.topk(k, dim=-1)
+                if diversity_penalty > 0.0 and n_active > 1:
+                    # Diverse beam search: select beams sequentially,
+                    # penalizing tokens already chosen at this step
+                    k = min(beam_size, next_scores.numel())
+                    flat_scores = next_scores.view(-1).clone()
+                    selected_tokens = set()
+                    topk_flat = []
+                    topk_scores_list = []
+
+                    for _ in range(k):
+                        best_idx = flat_scores.argmax().item()
+                        best_score = flat_scores[best_idx].item()
+                        if best_score <= -1e8:
+                            break
+                        topk_flat.append(best_idx)
+                        topk_scores_list.append(best_score)
+                        flat_scores[best_idx] = -1e9  # Don't pick same again
+
+                        # Penalize the same token across all beams
+                        token_id = best_idx % self.vocab_size
+                        if token_id not in selected_tokens:
+                            selected_tokens.add(token_id)
+                            # Penalize this token in all beam positions
+                            for beam_i in range(n_active):
+                                penalty_idx = beam_i * self.vocab_size + token_id
+                                if penalty_idx < flat_scores.numel():
+                                    flat_scores[penalty_idx] -= diversity_penalty
+
+                    topk_flat = torch.tensor(topk_flat, device=device)
+                    topk_scores = torch.tensor(topk_scores_list, device=device)
+                    k = len(topk_flat)
+                else:
+                    next_scores = next_scores.view(-1)
+                    k = min(beam_size, next_scores.numel())
+                    topk_scores, topk_flat = next_scores.topk(k, dim=-1)
+
                 beam_indices = topk_flat // self.vocab_size
                 token_indices = topk_flat % self.vocab_size
 

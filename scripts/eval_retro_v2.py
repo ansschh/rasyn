@@ -127,14 +127,15 @@ def forward_roundtrip(
 
 @click.command()
 @click.option("--checkpoint", required=True, help="Path to v2 model checkpoint")
-@click.option("--data", default="data/processed/uspto50k/augmented_train.jsonl")
-@click.option("--max-samples", default=1000, type=int)
+@click.option("--data", default="data/processed/uspto50k/augmented_test.jsonl")
+@click.option("--max-samples", default=5000, type=int)
 @click.option("--skip", default=0, type=int)
 @click.option("--beam-size", default=10, type=int)
 @click.option("--max-len", default=128, type=int)
+@click.option("--diversity-penalty", default=0.5, type=float, help="Beam diversity penalty (0=none)")
 @click.option("--forward-checkpoint", default=None, help="Forward model for round-trip")
 @click.option("--device", default="auto")
-def main(checkpoint, data, max_samples, skip, beam_size, max_len, forward_checkpoint, device):
+def main(checkpoint, data, max_samples, skip, beam_size, max_len, diversity_penalty, forward_checkpoint, device):
     """Evaluate RetroTransformer v2."""
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -214,7 +215,8 @@ def main(checkpoint, data, max_samples, skip, beam_size, max_len, forward_checkp
         # Beam search
         beam_results = model.generate_beam(
             src_ids, tokenizer.bos_token_id, tokenizer.eos_token_id,
-            beam_size=beam_size, max_len=max_len, segment_ids=seg_ids,
+            beam_size=beam_size, max_len=max_len,
+            diversity_penalty=diversity_penalty, segment_ids=seg_ids,
         )[0]
 
         # Extract predictions
