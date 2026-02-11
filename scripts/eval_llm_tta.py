@@ -342,6 +342,11 @@ def main(
     model.eval()
     logger.info(f"LLM loaded on {device}")
 
+    # Disable HuggingFace Hub online checks after model is loaded
+    # (avoids HTTP HEAD on every generate call for group beam search)
+    import os
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
     # ── Load forward model (optional) ────────────────────────────
     fwd_model = None
     fwd_tokenizer = None
