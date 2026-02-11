@@ -159,6 +159,7 @@ def main(checkpoint, data, max_samples, num_beams, num_beam_groups, diversity_pe
             if num_beam_groups > 1:
                 gen_kwargs["num_beam_groups"] = num_beam_groups
                 gen_kwargs["diversity_penalty"] = diversity_penalty
+                gen_kwargs["trust_remote_code"] = True
             outputs = model.generate(**gen_kwargs)
 
         # Decode and extract completions
