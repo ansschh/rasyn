@@ -35,6 +35,16 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+# Import RDKit at module level so failures are loud, not silent
+try:
+    from rdkit import Chem
+    from rdkit import RDLogger
+    RDLogger.logger().setLevel(RDLogger.ERROR)  # Suppress RDKit warnings
+    RDKIT_AVAILABLE = True
+except ImportError:
+    Chem = None
+    RDKIT_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -223,14 +233,15 @@ def run_all_checks(model, train_dataset, tokenizer, device, data_path) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 
 def is_valid_smiles(smi: str) -> bool:
-    try:
-        from rdkit import Chem
-        return Chem.MolFromSmiles(smi.strip()) is not None
-    except Exception:
+    if not RDKIT_AVAILABLE:
         return False
+    mol = Chem.MolFromSmiles(smi.strip())
+    return mol is not None
 
 
 def check_validity(smiles_str: str) -> bool:
+    if not RDKIT_AVAILABLE:
+        return False
     parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
     for p in parts:
         p = p.strip()
@@ -240,20 +251,18 @@ def check_validity(smiles_str: str) -> bool:
 
 
 def canonicalize_and_sort(smiles_str: str) -> str:
-    try:
-        from rdkit import Chem
-        parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
-        canon = []
-        for p in parts:
-            p = p.strip()
-            if not p:
-                continue
-            mol = Chem.MolFromSmiles(p)
-            if mol:
-                canon.append(Chem.MolToSmiles(mol))
-        return ".".join(sorted(canon)) if canon else ""
-    except Exception:
+    if not RDKIT_AVAILABLE:
         return ""
+    parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
+    canon = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        mol = Chem.MolFromSmiles(p)
+        if mol:
+            canon.append(Chem.MolToSmiles(mol))
+    return ".".join(sorted(canon)) if canon else ""
 
 
 def evaluate(model, val_loader, tokenizer, device):
@@ -271,6 +280,10 @@ def evaluate(model, val_loader, tokenizer, device):
     total_copy_sum = 0.0
     total_copy_count = 0
     n_batches = 0
+    validity_debug_count = 0  # Log first few validity failures
+
+    if not RDKIT_AVAILABLE:
+        logger.warning("RDKit not available — validity/canon metrics will be 0")
 
     with torch.no_grad():
         for batch in val_loader:
@@ -308,8 +321,19 @@ def evaluate(model, val_loader, tokenizer, device):
                 tgt_str = tokenizer.decode(tgt_ids[i].tolist())
                 if pred_str == tgt_str:
                     total_exact += 1
-                if check_validity(pred_str):
+                valid = check_validity(pred_str)
+                if valid:
                     total_valid += 1
+                elif validity_debug_count < 3:
+                    # Log first few validity failures for debugging
+                    logger.info(f"    [validity debug] pred_str='{pred_str[:80]}' valid={valid}")
+                    if RDKIT_AVAILABLE and pred_str:
+                        # Test individual components
+                        parts = pred_str.replace(" . ", ".").split(".")
+                        for j, p in enumerate(parts[:3]):
+                            mol = Chem.MolFromSmiles(p.strip())
+                            logger.info(f"      component[{j}]='{p.strip()[:50]}' -> mol={mol is not None}")
+                    validity_debug_count += 1
                 pred_c = canonicalize_and_sort(pred_str)
                 tgt_c = canonicalize_and_sort(tgt_str)
                 if pred_c and tgt_c and pred_c == tgt_c:
@@ -338,8 +362,9 @@ def train(
     gradient_clip=1.0, label_smoothing=0.05,
     log_every=50, eval_every=5, sample_every=10,
     train_dataset=None, model_config=None,
+    patience=15, resume_from=None,
 ):
-    """Full training loop with copy mechanism monitoring."""
+    """Full training loop with copy mechanism monitoring and early stopping."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -363,15 +388,33 @@ def train(
 
     log_file = output_dir / "training_log.jsonl"
     best_val_loss = float("inf")
+    best_val_exact = 0.0
+    epochs_without_improvement = 0
     global_step = 0
+    start_epoch = 1
+
+    # Resume from checkpoint if provided
+    if resume_from:
+        resume_path = Path(resume_from)
+        if (resume_path / "training_state.pt").exists():
+            state = torch.load(resume_path / "training_state.pt", map_location=device, weights_only=False)
+            optimizer.load_state_dict(state["optimizer"])
+            scheduler.load_state_dict(state["scheduler"])
+            global_step = state["global_step"]
+            start_epoch = state["epoch"] + 1
+            best_val_loss = state.get("best_val_loss", float("inf"))
+            best_val_exact = state.get("best_val_exact", 0.0)
+            epochs_without_improvement = state.get("epochs_without_improvement", 0)
+            logger.info(f"Resumed from epoch {start_epoch - 1}, step {global_step}, best_val_loss={best_val_loss:.4f}")
 
     logger.info(f"Training for {epochs} epochs, {total_steps} total steps")
     logger.info(f"  LR: {lr}, warmup: {warmup_steps}, label_smoothing: {label_smoothing}")
+    logger.info(f"  Early stopping patience: {patience} epochs")
 
     model.train()
     start_time = time.time()
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_loss = 0.0
         epoch_correct = 0
         epoch_tokens = 0
@@ -465,19 +508,62 @@ def train(
                 f"copy={metrics['val_copy_rate']:.3f}"
             )
 
+            # Track improvement by val_loss OR val_exact_match
+            improved = False
             if metrics["val_loss"] < best_val_loss:
                 best_val_loss = metrics["val_loss"]
+                improved = True
+            if metrics["val_exact_match"] > best_val_exact:
+                best_val_exact = metrics["val_exact_match"]
+                improved = True
+
+            if improved:
+                epochs_without_improvement = 0
                 from rasyn.models.retro.model_v2 import save_retro_model_v2
                 save_retro_model_v2(
                     model, tokenizer, output_dir / "best",
                     config=model_config,
                     extra={"epoch": epoch, "val_metrics": metrics},
                 )
-                logger.info(f"  New best! val_loss={best_val_loss:.4f}")
+                # Save training state for resume
+                torch.save({
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "global_step": global_step,
+                    "epoch": epoch,
+                    "best_val_loss": best_val_loss,
+                    "best_val_exact": best_val_exact,
+                    "epochs_without_improvement": 0,
+                }, output_dir / "best" / "training_state.pt")
+                logger.info(f"  New best! val_loss={best_val_loss:.4f} exact={best_val_exact:.4f}")
+            else:
+                epochs_without_improvement += eval_every
+                logger.info(
+                    f"  No improvement for {epochs_without_improvement} epochs "
+                    f"(patience={patience}, best_loss={best_val_loss:.4f}, best_exact={best_val_exact:.4f})"
+                )
+
+            # Early stopping
+            if patience > 0 and epochs_without_improvement >= patience:
+                logger.info(
+                    f"\n*** EARLY STOPPING at epoch {epoch} ***"
+                    f"\n  No improvement for {epochs_without_improvement} epochs."
+                    f"\n  Best val_loss={best_val_loss:.4f}, best_exact={best_val_exact:.4f}"
+                )
+                # Save final state before stopping
+                from rasyn.models.retro.model_v2 import save_retro_model_v2
+                save_retro_model_v2(
+                    model, tokenizer, output_dir / "early_stopped",
+                    config=model_config,
+                    extra={"epoch": epoch, "best_val_loss": best_val_loss,
+                           "best_val_exact": best_val_exact, "early_stopped": True},
+                )
+                return
 
             with open(log_file, "a") as f:
                 metrics["epoch"] = epoch
                 metrics["type"] = "validation"
+                metrics["epochs_without_improvement"] = epochs_without_improvement
                 f.write(json.dumps(metrics) + "\n")
 
         # Sample generations
@@ -543,13 +629,16 @@ def train(
 @click.option("--conditioning-dropout", default=0.2, type=float)
 @click.option("--use-rxn-class/--no-rxn-class", default=True)
 @click.option("--val-split", default=0.1, type=float)
+@click.option("--patience", default=15, type=int, help="Early stopping patience (0=disable)")
+@click.option("--resume", default=None, type=str, help="Resume from checkpoint dir")
 @click.option("--sanity-only", is_flag=True)
 @click.option("--skip-sanity", is_flag=True)
 @click.option("--device", default="auto")
 def main(
     data, output_dir, epochs, batch_size, lr, d_model, nhead, n_layers, d_ff,
     max_src_len, max_tgt_len, warmup_steps, label_smoothing,
-    conditioning_dropout, use_rxn_class, val_split, sanity_only, skip_sanity, device,
+    conditioning_dropout, use_rxn_class, val_split, patience, resume,
+    sanity_only, skip_sanity, device,
 ):
     """Train RetroTransformer v2."""
     if device == "auto":
@@ -601,10 +690,26 @@ def main(
     }
 
     from rasyn.models.retro.model_v2 import RetroTransformerV2
-    model = RetroTransformerV2(**model_config).to(device)
 
-    # Sanity checks
-    if not skip_sanity:
+    # Resume from checkpoint or build fresh
+    resume_dir = None
+    if resume:
+        resume_path = PROJECT_ROOT / resume
+        if (resume_path / "model.pt").exists():
+            logger.info(f"Loading model from {resume_path} for resume...")
+            from rasyn.models.retro.model_v2 import load_retro_model_v2
+            model, _ = load_retro_model_v2(str(resume_path / "model.pt"), device=device)
+            model.train()
+            resume_dir = resume_path
+            logger.info("Model loaded for resume")
+        else:
+            logger.warning(f"Resume path {resume_path} not found, starting fresh")
+            model = RetroTransformerV2(**model_config).to(device)
+    else:
+        model = RetroTransformerV2(**model_config).to(device)
+
+    # Sanity checks (skip if resuming)
+    if not skip_sanity and not resume:
         all_passed = run_all_checks(model, train_dataset, tokenizer, device, data_path)
         if sanity_only:
             return
@@ -613,6 +718,13 @@ def main(
         # Re-init model after sanity (overfit modified weights)
         model = RetroTransformerV2(**model_config).to(device)
         logger.info("Model re-initialized for full training")
+    elif sanity_only:
+        # Still allow sanity-only even when resuming
+        model_fresh = RetroTransformerV2(**model_config).to(device)
+        run_all_checks(model_fresh, train_dataset, tokenizer, device, data_path)
+        return
+
+    logger.info(f"RDKit available: {RDKIT_AVAILABLE}")
 
     # Data loaders
     train_loader = DataLoader(
@@ -631,6 +743,7 @@ def main(
         epochs=epochs, lr=lr, warmup_steps=warmup_steps,
         label_smoothing=label_smoothing,
         train_dataset=train_dataset, model_config=model_config,
+        patience=patience, resume_from=resume_dir,
     )
 
 
