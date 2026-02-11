@@ -477,10 +477,13 @@ def main(
         if gt_normalized in unique_base[:10]:
             top10_base += 1
 
-        # TTA aggregation: rank by cumulative log-prob
+        # TTA aggregation: rank by (count, avg_score)
+        # Correct predictions are consistent across augmented variants,
+        # so count (frequency) is the primary metric. Average log-prob breaks ties.
+        import math
         tta_ranked = sorted(
             all_candidates.items(),
-            key=lambda x: sum(x[1]),
+            key=lambda x: (len(x[1]), sum(x[1]) / len(x[1])),
             reverse=True,
         )
         tta_predictions = [r for r, _ in tta_ranked]
@@ -497,7 +500,11 @@ def main(
 
         # Round-trip re-ranking (if forward model available)
         if fwd_model is not None:
-            tta_with_scores = [(r, sum(s)) for r, s in tta_ranked[:20]]  # top 20
+            # Normalize score to [0, 1] based on count/max_possible
+            max_count = n_augments * num_beams
+            tta_with_scores = [
+                (r, len(s) / max_count) for r, s in tta_ranked[:20]
+            ]  # top 20
             rt_results = round_trip_rerank(
                 tta_with_scores, original_product,
                 fwd_model, fwd_tokenizer, device,
