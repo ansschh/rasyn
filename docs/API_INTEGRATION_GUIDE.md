@@ -1015,6 +1015,141 @@ Remove it from the `RASYN_API_KEYS` list and restart the service. The old key wi
 
 ---
 
+## 13. API Key Management (Admin Endpoints)
+
+Admin API keys can create, list, and revoke other keys. This lets your backend issue keys to users programmatically.
+
+### Create a Key
+
+```
+POST /api/v1/keys
+```
+
+**Requires admin API key.**
+
+**Request:**
+```json
+{
+  "name": "user-john@example.com",
+  "role": "user"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | **required** | Human-readable label (e.g., user email) |
+| `role` | string | `"user"` | `"user"` (API access only) or `"admin"` (can manage keys) |
+
+**Response:**
+```json
+{
+  "id": "0301bb33a1eaef71",
+  "key": "rsy_EShPbqoAzq_4sTjSKy6TlEuxYBTumrwmFHU8YqkhcKdM6teB",
+  "name": "user-john@example.com",
+  "role": "user",
+  "created_at": "2026-02-12T21:45:29.902327+00:00"
+}
+```
+
+> **IMPORTANT:** The `key` field is only returned at creation time. Store it immediately — it cannot be retrieved later (only its hash is stored).
+
+### List Keys
+
+```
+GET /api/v1/keys
+```
+
+**Requires admin API key.**
+
+**Response:**
+```json
+{
+  "keys": [
+    {
+      "id": "0301bb33a1eaef71",
+      "name": "user-john@example.com",
+      "role": "user",
+      "created_at": "2026-02-12T21:45:29.902327+00:00",
+      "last_used_at": "2026-02-12T22:01:15.123456+00:00",
+      "request_count": 47,
+      "is_active": 1,
+      "created_by": "Admin (env)"
+    }
+  ],
+  "total": 1
+}
+```
+
+### Revoke a Key
+
+```
+DELETE /api/v1/keys/{key_id}
+```
+
+**Requires admin API key.**
+
+**Response:**
+```json
+{
+  "revoked": true,
+  "key_id": "0301bb33a1eaef71"
+}
+```
+
+Revoked keys stop working within 30 seconds (cache TTL).
+
+### User Onboarding Flow (for your frontend)
+
+```typescript
+// In your Next.js API route for user signup/subscription:
+async function createUserAPIKey(userEmail: string) {
+  const res = await fetch(`${RASYN_API_URL}/api/v1/keys`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": process.env.RASYN_ADMIN_KEY!, // Your admin key
+    },
+    body: JSON.stringify({
+      name: `user-${userEmail}`,
+      role: "user",
+    }),
+  });
+  const data = await res.json();
+  // Store data.key in your database associated with the user
+  // The user's requests will then use this key
+  return data;
+}
+```
+
+### Key Roles
+
+| Role | API Access | Create Keys | List Keys | Revoke Keys |
+|------|-----------|-------------|-----------|-------------|
+| `user` | Yes | No | No | No |
+| `admin` | Yes | Yes | Yes | Yes |
+
+---
+
+## 14. Gradio Demo Access
+
+The built-in demo at `/demo` is protected with a username/password login (separate from API keys).
+
+**Default credentials:**
+- Username: `rasyn`
+- Password: `rasyn2026`
+
+Access at: `http://rasyn-prod-alb-449951296.us-east-1.elb.amazonaws.com/demo/`
+
+To change demo credentials, update the env vars on EC2:
+```bash
+sudo systemctl edit rasyn
+# Add: Environment=RASYN_DEMO_USER=newuser
+# Add: Environment=RASYN_DEMO_PASS=newpassword
+sudo systemctl restart rasyn
+```
+
+---
+
 ## Quick Reference: cURL Examples
 
 ```bash
