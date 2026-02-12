@@ -232,7 +232,7 @@ Resources:
             source $APP_DIR/venv/bin/activate
 
             # Install PyTorch with CUDA first (the AMI may have it system-wide, but venv needs it)
-            pip install --no-cache-dir torch==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+            pip install --no-cache-dir torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 
             # Install project requirements
             pip install --no-cache-dir -r requirements.txt

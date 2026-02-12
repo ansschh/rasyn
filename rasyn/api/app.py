@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,12 +13,32 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from rasyn.api.routes.molecules import router as molecules_router
 from rasyn.api.routes.retro import router as retro_router
+from rasyn.api.security import (
+    APIKeyMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from rasyn.service.model_manager import ModelManager
 from rasyn.service.pipeline_service import PipelineService
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "serve.yaml"
+
+# Allowed CORS origins — set via RASYN_CORS_ORIGINS env var (comma-separated)
+# or defaults to rasyn.ai domain
+_DEFAULT_ORIGINS = [
+    "https://rasyn.ai",
+    "https://www.rasyn.ai",
+    "https://app.rasyn.ai",
+]
+
+
+def _get_cors_origins() -> list[str]:
+    env = os.environ.get("RASYN_CORS_ORIGINS", "")
+    if env.strip():
+        return [o.strip() for o in env.split(",") if o.strip()]
+    return _DEFAULT_ORIGINS
 
 
 def load_config(path: str | Path | None = None) -> dict:
@@ -74,20 +95,33 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS — allow all origins for development; restrict in production
+    # --- Security middleware (applied bottom-up: last added = first executed) ---
+
+    # 1. CORS — restrict to allowed origins
+    cors_origins = _get_cors_origins()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+        expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     )
 
-    # Mount API routes
+    # 2. Security headers
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # 3. Rate limiting
+    app.add_middleware(RateLimitMiddleware)
+
+    # 4. API key authentication (outermost — runs first)
+    app.add_middleware(APIKeyMiddleware)
+
+    # --- API routes ---
     app.include_router(retro_router, prefix="/api/v1")
     app.include_router(molecules_router, prefix="/api/v1/molecules")
 
-    # Mount Gradio demo (lazy import to avoid hard dependency)
+    # --- Gradio demo (lazy import to avoid hard dependency) ---
     try:
         import gradio as gr
         from rasyn.gradio_app import create_gradio_app
