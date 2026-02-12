@@ -112,9 +112,12 @@ class ModelManager:
             logger.warning(f"LLM checkpoint not found: {checkpoint}")
             return
         device = self._resolve_device(cfg)
+        base_weights = cfg.get("base_weights")
         logger.info(f"Loading LLM from {checkpoint} on {device}...")
         from rasyn.models.llm.model import load_trained_model
-        self._llm_model, self._llm_tokenizer = load_trained_model(checkpoint, device)
+        self._llm_model, self._llm_tokenizer = load_trained_model(
+            checkpoint, device, base_weights_path=base_weights,
+        )
         self._loaded.append("llm")
         logger.info("LLM loaded.")
 

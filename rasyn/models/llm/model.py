@@ -168,21 +168,53 @@ def save_model(model, tokenizer, output_dir: str | Path) -> None:
     logger.info(f"Model and tokenizer saved to {output_dir}")
 
 
-def load_trained_model(checkpoint_dir: str | Path, device: str = "auto"):
-    """Load a fine-tuned model from checkpoint."""
+def load_trained_model(
+    checkpoint_dir: str | Path,
+    device: str = "auto",
+    base_weights_path: str | Path | None = None,
+):
+    """Load a fine-tuned model from checkpoint.
+
+    Args:
+        checkpoint_dir: Path to LoRA adapter directory (or full model dir).
+        device: Device to load onto.
+        base_weights_path: Path to RSGPT base .pth weights. If None,
+            auto-discovers at ``weights/rsgpt/finetune_50k.pth`` relative
+            to the project root.
+    """
     from transformers import AutoTokenizer
     from peft import PeftModel
 
     checkpoint_dir = Path(checkpoint_dir)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
 
-    # Load base model first, then LoRA.
-    # load_rsgpt_model without weights_path may use a fallback tokenizer with
-    # a different vocab size. Resize embeddings to match the checkpoint tokenizer
-    # before loading the adapter weights.
-    base_model, _ = load_rsgpt_model(use_lora=False)
-    base_model.resize_token_embeddings(len(tokenizer))
-    model = PeftModel.from_pretrained(base_model, checkpoint_dir)
+    if (checkpoint_dir / "adapter_config.json").exists():
+        # LoRA checkpoint — need base weights
+        if base_weights_path is None:
+            # Auto-discover relative to project root
+            project_root = Path(__file__).parent.parent.parent
+            base_weights_path = project_root / "weights" / "rsgpt" / "finetune_50k.pth"
+
+        base_weights_path = Path(base_weights_path)
+        if base_weights_path.exists():
+            logger.info(f"Loading RSGPT base weights from {base_weights_path}")
+            base_model, _ = load_rsgpt_model(
+                weights_path=str(base_weights_path), use_lora=False,
+            )
+        else:
+            logger.warning(
+                f"Base weights not found at {base_weights_path}. "
+                "Model will have random base weights."
+            )
+            base_model, _ = load_rsgpt_model(use_lora=False)
+
+        # Resize to match checkpoint tokenizer (base may have different vocab)
+        base_model.resize_token_embeddings(len(tokenizer))
+        model = PeftModel.from_pretrained(base_model, checkpoint_dir)
+    else:
+        # Full model checkpoint (not LoRA)
+        from transformers import LlamaForCausalLM
+        model = LlamaForCausalLM.from_pretrained(str(checkpoint_dir))
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"

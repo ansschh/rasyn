@@ -7,6 +7,7 @@ server:
 models:
   llm:
     checkpoint: "checkpoints/llm/uspto50k_v6/final"
+    base_weights: "weights/rsgpt/finetune_50k.pth"  # RSGPT base model weights
     device: "auto"
   retro_v2:
     checkpoint: "checkpoints/retro_v2/uspto50k/best/model.pt"
