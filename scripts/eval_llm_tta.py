@@ -1,24 +1,26 @@
-"""Evaluate LLM with Test-Time SMILES Augmentation (TTA) and optional round-trip re-ranking.
+"""Evaluate LLM with Test-Time Augmentation (TTA) via temperature sampling.
 
-For each test product, generates N random SMILES representations, runs inference
-on each variant, aggregates predictions by canonical form, and ranks by cumulative
-log-probability. Optionally re-ranks using the forward model (round-trip verification).
+Uses self-consistency: run multiple stochastic inference passes on the same
+canonical prompt, aggregate predictions by canonical form, rank by frequency.
+Optionally re-ranks using the forward model (round-trip verification).
 
-Expected improvement: 80.9% → 88-93% Top-1 (TTA alone), +2-3% with round-trip.
+Strategy: Temperature sampling provides diversity (the model was trained on
+canonical SMILES only, so SMILES augmentation doesn't work). Correct predictions
+are high-probability and appear consistently across independent samples.
 
 Usage:
-    # Quick validation (20 min)
-    python -u scripts/eval_llm_tta.py --max-samples 200 --n-augments 10
+    # Quick validation (~15 min)
+    python -u scripts/eval_llm_tta.py --max-samples 200 --n-samples 100
 
-    # Full run (overnight, ~10 hrs)
-    python -u scripts/eval_llm_tta.py --n-augments 20
+    # Full run (overnight)
+    python -u scripts/eval_llm_tta.py --n-samples 200
 
     # With round-trip re-ranking
-    python -u scripts/eval_llm_tta.py --n-augments 20 \
+    python -u scripts/eval_llm_tta.py --n-samples 200 \
         --forward-checkpoint checkpoints/forward/uspto50k/best_model.pt
 
     # RunPod background
-    nohup python -u scripts/eval_llm_tta.py --n-augments 20 > eval_tta.log 2>&1 &
+    nohup python -u scripts/eval_llm_tta.py --n-samples 200 > eval_tta.log 2>&1 &
 """
 
 from __future__ import annotations
@@ -82,16 +84,6 @@ def normalize_reactants(smiles_str: str) -> str:
     return ".".join(sorted(canon_parts))
 
 
-def randomize_smiles(smiles: str) -> str:
-    """Generate a random (non-canonical) SMILES representation."""
-    if not RDKIT_AVAILABLE:
-        return smiles
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return smiles
-    return Chem.MolToSmiles(mol, doRandom=True)
-
-
 def tanimoto_similarity(smi1: str, smi2: str) -> float:
     """Tanimoto similarity between two SMILES using Morgan fingerprints."""
     if not RDKIT_AVAILABLE:
@@ -106,16 +98,6 @@ def tanimoto_similarity(smi1: str, smi2: str) -> float:
         return DataStructs.TanimotoSimilarity(fp1, fp2)
     except Exception:
         return 0.0
-
-
-def is_valid_smiles(smi: str) -> bool:
-    if not RDKIT_AVAILABLE:
-        return False
-    try:
-        mol = Chem.MolFromSmiles(smi.strip())
-        return mol is not None
-    except Exception:
-        return False
 
 
 # ── Data loading ─────────────────────────────────────────────────────
@@ -197,26 +179,6 @@ def load_training_products(data_path: Path) -> set[str]:
     return products
 
 
-# ── Prompt manipulation ──────────────────────────────────────────────
-
-def swap_product_in_prompt(prompt: str, new_product: str) -> str:
-    """Replace the product SMILES in an edit-conditioned prompt.
-
-    Uses parse_edit_prompt + build_edit_prompt for safe reconstruction.
-    """
-    from rasyn.models.llm.tokenizer import parse_edit_prompt, build_edit_prompt
-
-    parsed = parse_edit_prompt(prompt)
-
-    return build_edit_prompt(
-        product_smiles=new_product,
-        edit_tokens=parsed["edit"] if parsed["edit"] != "NO_DISCONNECT" else None,
-        synthon_smiles=parsed["synthons"] if parsed["synthons"] else None,
-        lg_hints=parsed["lg_hints"] if parsed["lg_hints"] else None,
-        constraints=parsed["constraints"] if parsed["constraints"] else None,
-    )
-
-
 # ── Round-trip re-ranking ────────────────────────────────────────────
 
 def round_trip_rerank(
@@ -232,22 +194,21 @@ def round_trip_rerank(
     """Re-rank candidates using forward model verification.
 
     Args:
-        candidates: List of (canonical_reactants, llm_score).
+        candidates: List of (canonical_reactants, tta_score).
         product_smiles: Original product SMILES.
         fwd_model: ForwardTransformer model.
         fwd_tokenizer: ForwardTokenizer.
         device: Device string.
-        alpha: Weight for LLM score.
+        alpha: Weight for TTA score.
         beta: Weight for round-trip score.
 
     Returns:
-        List of (canonical_reactants, combined_score, rt_score), sorted by combined_score.
+        List of (canonical_reactants, combined_score, rt_score), sorted desc.
     """
     product_canon = canonicalize_smiles(product_smiles)
     reranked = []
 
-    for reactants_str, llm_score in candidates:
-        # Encode reactants for forward model
+    for reactants_str, tta_score in candidates:
         src_ids = torch.tensor(
             [fwd_tokenizer.encode(reactants_str, max_len=max_len)],
             dtype=torch.long,
@@ -270,11 +231,30 @@ def round_trip_rerank(
         else:
             rt_score = 0.0
 
-        combined = alpha * llm_score + beta * rt_score
+        combined = alpha * tta_score + beta * rt_score
         reranked.append((reactants_str, combined, rt_score))
 
     reranked.sort(key=lambda x: x[1], reverse=True)
     return reranked
+
+
+# ── Decoding helpers ─────────────────────────────────────────────────
+
+def decode_completion(tokenizer, output_ids) -> str:
+    """Decode model output and extract the completion after <OUT>."""
+    text = tokenizer.decode(output_ids, skip_special_tokens=False)
+    if "<OUT>" in text:
+        completion = text.split("<OUT>")[-1]
+        for stop in ["</s>", "<EOS>", "<pad>", "<PAD>"]:
+            completion = completion.split(stop)[0]
+        completion = completion.replace("<unk>", "").strip()
+        return completion
+    return ""
+
+
+def check_topk(gt: str, predictions: list[str], k: int) -> bool:
+    """Check if ground truth is in top-k predictions."""
+    return gt in predictions[:k]
 
 
 # ── Main evaluation ──────────────────────────────────────────────────
@@ -283,28 +263,37 @@ def round_trip_rerank(
 @click.option("--checkpoint", default="checkpoints/llm/uspto50k_v6/final")
 @click.option("--forward-checkpoint", default=None, type=str,
               help="Forward model checkpoint for round-trip re-ranking")
-@click.option("--n-augments", default=20, type=int,
-              help="Number of SMILES augmentations per test product")
-@click.option("--max-samples", default=5000, type=int)
-@click.option("--num-beams", default=10, type=int)
-@click.option("--num-beam-groups", default=5, type=int)
-@click.option("--diversity-penalty", default=1.0, type=float)
+@click.option("--n-samples", default=200, type=int,
+              help="Total number of stochastic samples per test product (across all passes)")
+@click.option("--samples-per-pass", default=10, type=int,
+              help="Number of sequences per generation call")
+@click.option("--temperature", default=0.8, type=float,
+              help="Sampling temperature for TTA")
+@click.option("--top-k", default=50, type=int, help="Top-k for sampling")
+@click.option("--top-p", default=0.95, type=float, help="Nucleus sampling threshold")
+@click.option("--base-beams", default=10, type=int,
+              help="Number of beams for deterministic base evaluation")
+@click.option("--max-samples", default=5000, type=int, help="Max test samples to evaluate")
 @click.option("--max-new-tokens", default=256, type=int)
 @click.option("--check-overlap/--no-check-overlap", default=True)
-@click.option("--rt-alpha", default=0.7, type=float, help="LLM score weight for round-trip re-ranking")
+@click.option("--rt-alpha", default=0.7, type=float, help="TTA score weight for re-ranking")
 @click.option("--rt-beta", default=0.3, type=float, help="Round-trip score weight")
 @click.option("--device", default="auto")
 @click.option("--output", default=None, type=str, help="Output JSON file for results")
 def main(
-    checkpoint, forward_checkpoint, n_augments, max_samples,
-    num_beams, num_beam_groups, diversity_penalty, max_new_tokens,
-    check_overlap, rt_alpha, rt_beta, device, output,
+    checkpoint, forward_checkpoint, n_samples, samples_per_pass,
+    temperature, top_k, top_p, base_beams, max_samples,
+    max_new_tokens, check_overlap, rt_alpha, rt_beta, device, output,
 ):
-    """Evaluate LLM with Test-Time SMILES Augmentation (TTA)."""
+    """Evaluate LLM with Test-Time Augmentation via temperature sampling."""
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     checkpoint = Path(checkpoint)
+    n_passes = max(1, n_samples // samples_per_pass)
+
+    logger.info(f"TTA config: {n_passes} passes x {samples_per_pass} samples/pass "
+                f"= {n_passes * samples_per_pass} total samples, temp={temperature}")
 
     # ── Download and preprocess test data ─────────────────────────
     test_csv = PROJECT_ROOT / "data" / "external" / "uspto50k_test.csv"
@@ -342,11 +331,6 @@ def main(
     model.eval()
     logger.info(f"LLM loaded on {device}")
 
-    # Disable HuggingFace Hub online checks after model is loaded
-    # (avoids HTTP HEAD on every generate call for group beam search)
-    import os
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
     # ── Load forward model (optional) ────────────────────────────
     fwd_model = None
     fwd_tokenizer = None
@@ -356,13 +340,11 @@ def main(
         fwd_model, fwd_tokenizer = load_forward_model(forward_checkpoint, device=device)
         logger.info("Forward model loaded for round-trip re-ranking")
 
-    # ── Evaluate with TTA ─────────────────────────────────────────
-    # Metrics: with and without TTA, with and without round-trip
+    # ── Evaluate ──────────────────────────────────────────────────
     top1_base = top3_base = top5_base = top10_base = 0
     top1_tta = top3_tta = top5_tta = top10_tta = 0
     top1_rt = top3_rt = top5_rt = top10_rt = 0
     total = 0
-    total_candidates = 0
     total_unique_candidates = 0
     total_rt_exact = 0
     total_rt_checked = 0
@@ -376,135 +358,105 @@ def main(
         if not gt_normalized:
             continue
 
-        # Parse product from prompt for augmentation
+        # Parse product for round-trip
         from rasyn.models.llm.tokenizer import parse_edit_prompt
         parsed = parse_edit_prompt(prompt)
         original_product = parsed["product"]
-
         if not original_product:
             continue
 
-        mol = Chem.MolFromSmiles(original_product) if RDKIT_AVAILABLE else None
-        if mol is None:
-            continue
+        # Tokenize once (same prompt for all passes)
+        inputs = tokenize_prompt_for_inference(
+            prompt, tokenizer, max_length=512, device=device
+        )
 
-        # Generate SMILES variants (always include canonical first)
-        variants = [original_product]
-        seen_variants = {original_product}
-        for _ in range(n_augments * 3):  # oversample to get n_augments unique
-            if len(variants) >= n_augments:
-                break
-            rand_smi = Chem.MolToSmiles(mol, doRandom=True)
-            if rand_smi not in seen_variants:
-                seen_variants.add(rand_smi)
-                variants.append(rand_smi)
-
-        # Collect predictions across all variants
-        all_candidates: dict[str, list[float]] = defaultdict(list)
-        base_predictions = []  # From canonical variant only
-
-        for v_idx, variant_smi in enumerate(variants):
-            # Reconstruct prompt with new product SMILES
-            variant_prompt = swap_product_in_prompt(prompt, variant_smi)
-
-            inputs = tokenize_prompt_for_inference(
-                variant_prompt, tokenizer, max_length=512, device=device
+        # ── Step 1: Deterministic beam search (base) ──────────
+        with torch.no_grad():
+            base_out = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                num_beams=base_beams,
+                num_return_sequences=min(base_beams, 10),
+                early_stopping=True,
+                pad_token_id=tokenizer.pad_token_id,
+                do_sample=False,
             )
 
+        base_predictions = []
+        seen_base = set()
+        for seq in base_out:
+            comp = decode_completion(tokenizer, seq)
+            if comp:
+                norm = normalize_reactants(comp)
+                if norm and norm not in seen_base:
+                    seen_base.add(norm)
+                    base_predictions.append(norm)
+
+        # ── Step 2: Temperature sampling (TTA) ────────────────
+        all_candidates: dict[str, int] = defaultdict(int)  # canonical → count
+
+        for pass_idx in range(n_passes):
             with torch.no_grad():
-                gen_kwargs = dict(
+                sample_out = model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    num_beams=num_beams,
-                    num_return_sequences=min(num_beams, 10),
-                    early_stopping=True,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    num_return_sequences=samples_per_pass,
                     pad_token_id=tokenizer.pad_token_id,
-                    return_dict_in_generate=True,
-                    output_scores=True,
                 )
-                if num_beam_groups > 1:
-                    gen_kwargs["num_beam_groups"] = num_beam_groups
-                    gen_kwargs["diversity_penalty"] = diversity_penalty
-                    gen_kwargs["trust_remote_code"] = True
 
-                outputs = model.generate(**gen_kwargs)
-
-            sequences = outputs.sequences
-            # Extract per-sequence scores
-            if hasattr(outputs, "sequences_scores") and outputs.sequences_scores is not None:
-                seq_scores = outputs.sequences_scores.tolist()
-            else:
-                # Fallback: use rank-based pseudo-scores
-                seq_scores = [-(j + 1) for j in range(sequences.shape[0])]
-
-            for j, output_ids in enumerate(sequences):
-                text = tokenizer.decode(output_ids, skip_special_tokens=False)
-                if "<OUT>" in text:
-                    completion = text.split("<OUT>")[-1]
-                    for stop in ["</s>", "<EOS>", "<pad>", "<PAD>"]:
-                        completion = completion.split(stop)[0]
-                    completion = completion.replace("<unk>", "").strip()
-                else:
-                    completion = ""
-
-                if completion:
-                    norm = normalize_reactants(completion)
+            for seq in sample_out:
+                comp = decode_completion(tokenizer, seq)
+                if comp:
+                    norm = normalize_reactants(comp)
                     if norm:
-                        score = seq_scores[j] if j < len(seq_scores) else -(j + 1)
-                        all_candidates[norm].append(score)
-                        total_candidates += 1
+                        all_candidates[norm] += 1
 
-                        # Track base (canonical variant) predictions
-                        if v_idx == 0:
-                            base_predictions.append(norm)
+        # Also add beam search predictions to candidate pool
+        for pred in base_predictions:
+            all_candidates[pred] += base_beams  # Weight beam predictions higher
 
-        # Deduplicate base predictions
-        seen = set()
-        unique_base = []
-        for p in base_predictions:
-            if p not in seen:
-                seen.add(p)
-                unique_base.append(p)
-
-        # Base metrics (no TTA, same as eval_llm_external.py)
-        total += 1
-        if unique_base and unique_base[0] == gt_normalized:
-            top1_base += 1
-        if gt_normalized in unique_base[:3]:
-            top3_base += 1
-        if gt_normalized in unique_base[:5]:
-            top5_base += 1
-        if gt_normalized in unique_base[:10]:
-            top10_base += 1
-
-        # TTA aggregation: rank by (count, avg_score)
-        # Correct predictions are consistent across augmented variants,
-        # so count (frequency) is the primary metric. Average log-prob breaks ties.
-        import math
+        # ── Step 3: Rank by frequency (self-consistency) ──────
         tta_ranked = sorted(
             all_candidates.items(),
-            key=lambda x: (len(x[1]), sum(x[1]) / len(x[1])),
+            key=lambda x: x[1],
             reverse=True,
         )
         tta_predictions = [r for r, _ in tta_ranked]
         total_unique_candidates += len(tta_predictions)
 
+        # ── Metrics ───────────────────────────────────────────
+        total += 1
+
+        # Base metrics
+        if base_predictions and base_predictions[0] == gt_normalized:
+            top1_base += 1
+        if check_topk(gt_normalized, base_predictions, 3):
+            top3_base += 1
+        if check_topk(gt_normalized, base_predictions, 5):
+            top5_base += 1
+        if check_topk(gt_normalized, base_predictions, 10):
+            top10_base += 1
+
+        # TTA metrics
         if tta_predictions and tta_predictions[0] == gt_normalized:
             top1_tta += 1
-        if gt_normalized in tta_predictions[:3]:
+        if check_topk(gt_normalized, tta_predictions, 3):
             top3_tta += 1
-        if gt_normalized in tta_predictions[:5]:
+        if check_topk(gt_normalized, tta_predictions, 5):
             top5_tta += 1
-        if gt_normalized in tta_predictions[:10]:
+        if check_topk(gt_normalized, tta_predictions, 10):
             top10_tta += 1
 
-        # Round-trip re-ranking (if forward model available)
+        # Round-trip re-ranking
         if fwd_model is not None:
-            # Normalize score to [0, 1] based on count/max_possible
-            max_count = n_augments * num_beams
+            max_count = n_passes * samples_per_pass + base_beams
             tta_with_scores = [
-                (r, len(s) / max_count) for r, s in tta_ranked[:20]
-            ]  # top 20
+                (r, count / max_count) for r, count in tta_ranked[:20]
+            ]
             rt_results = round_trip_rerank(
                 tta_with_scores, original_product,
                 fwd_model, fwd_tokenizer, device,
@@ -512,7 +464,6 @@ def main(
             )
             rt_predictions = [r for r, _, _ in rt_results]
 
-            # Track RT stats
             for _, _, rt_score in rt_results:
                 total_rt_checked += 1
                 if rt_score == 1.0:
@@ -520,11 +471,11 @@ def main(
 
             if rt_predictions and rt_predictions[0] == gt_normalized:
                 top1_rt += 1
-            if gt_normalized in rt_predictions[:3]:
+            if check_topk(gt_normalized, rt_predictions, 3):
                 top3_rt += 1
-            if gt_normalized in rt_predictions[:5]:
+            if check_topk(gt_normalized, rt_predictions, 5):
                 top5_rt += 1
-            if gt_normalized in rt_predictions[:10]:
+            if check_topk(gt_normalized, rt_predictions, 10):
                 top10_rt += 1
 
         # Progress logging
@@ -538,8 +489,7 @@ def main(
                 f"Base: {top1_base/total:.4f} | "
                 f"TTA: {top1_tta/total:.4f} | "
                 + (f"RT: {top1_rt/total:.4f} | " if fwd_model else "")
-                + f"Variants: {len(variants)} | "
-                f"Avg unique: {total_unique_candidates/total:.1f} | "
+                + f"Unique: {total_unique_candidates/total:.1f} | "
                 f"Rate: {rate:.2f} s/s | "
                 f"ETA: {eta/3600:.1f}h"
             )
@@ -548,25 +498,24 @@ def main(
     elapsed = time.time() - start_time
 
     logger.info(f"\n{'='*60}")
-    logger.info(f"TTA EVALUATION RESULTS")
+    logger.info(f"TTA EVALUATION RESULTS (Temperature Sampling)")
     logger.info(f"{'='*60}")
     logger.info(f"Checkpoint: {checkpoint}")
     logger.info(f"Samples: {total}")
-    logger.info(f"N augments: {n_augments}")
-    logger.info(f"Beams: {num_beams}, Groups: {num_beam_groups}")
-    logger.info(f"Total candidates: {total_candidates}")
+    logger.info(f"TTA: {n_passes} passes x {samples_per_pass} = {n_passes * samples_per_pass} samples, temp={temperature}")
+    logger.info(f"Base beams: {base_beams}")
     logger.info(f"Avg unique per sample: {total_unique_candidates/max(total,1):.1f}")
     logger.info(f"Time: {elapsed:.0f}s ({total/elapsed:.2f} samples/s)")
     logger.info(f"")
 
-    logger.info(f"  BASE (no TTA, canonical only):")
+    logger.info(f"  BASE (beam search, deterministic):")
     logger.info(f"    Top-1:  {top1_base/max(total,1):.4f} ({top1_base}/{total})")
     logger.info(f"    Top-3:  {top3_base/max(total,1):.4f} ({top3_base}/{total})")
     logger.info(f"    Top-5:  {top5_base/max(total,1):.4f} ({top5_base}/{total})")
     logger.info(f"    Top-10: {top10_base/max(total,1):.4f} ({top10_base}/{total})")
     logger.info(f"")
 
-    logger.info(f"  TTA ({n_augments} augments, log-prob aggregation):")
+    logger.info(f"  TTA (temperature sampling + beam, frequency-ranked):")
     logger.info(f"    Top-1:  {top1_tta/max(total,1):.4f} ({top1_tta}/{total})")
     logger.info(f"    Top-3:  {top3_tta/max(total,1):.4f} ({top3_tta}/{total})")
     logger.info(f"    Top-5:  {top5_tta/max(total,1):.4f} ({top5_tta}/{total})")
@@ -586,8 +535,11 @@ def main(
     # ── Save results ──────────────────────────────────────────────
     results = {
         "checkpoint": str(checkpoint),
-        "n_augments": n_augments,
-        "num_beams": num_beams,
+        "strategy": "temperature_sampling",
+        "n_passes": n_passes,
+        "samples_per_pass": samples_per_pass,
+        "temperature": temperature,
+        "base_beams": base_beams,
         "total_samples": total,
         "elapsed_seconds": elapsed,
         "base": {
