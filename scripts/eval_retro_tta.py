@@ -261,13 +261,20 @@ def main(checkpoint, beam_size, max_len, n_augments, max_samples, device, output
                 top_k_base[k] += 1
 
         # ── TTA: randomize input N times ─────────────────────
+        # Self-consistency: take top-1 from each augmented pass,
+        # count how many passes agree on each prediction.
+        # Using all beams fragments the vote and hurts accuracy.
         tta_candidates: dict[str, int] = defaultdict(int)
 
-        # Include canonical beam results (weighted by beam_size)
-        for norm, _ in base_results:
-            tta_candidates[norm] += beam_size
+        # Include canonical top-1 (strong weight)
+        if base_preds:
+            tta_candidates[base_preds[0]] += n_augments  # Weight = number of augments
 
-        # Augmented passes
+        # Also include canonical top-2..top-k with decreasing weight
+        for rank, pred in enumerate(base_preds[1:], start=1):
+            tta_candidates[pred] += max(1, n_augments // (rank + 1))
+
+        # Augmented passes: only top-1 from each
         for aug_idx in range(n_augments):
             rand_product = randomize_smiles(product)
             aug_parts = []
@@ -284,8 +291,13 @@ def main(checkpoint, beam_size, max_len, n_augments, max_samples, device, output
             aug_src = " ".join(aug_parts)
 
             aug_results = run_beam(aug_src)
+            # Only use top-1 (self-consistency voting)
+            seen_aug = set()
             for norm, _ in aug_results:
-                tta_candidates[norm] += 1
+                if norm not in seen_aug:
+                    seen_aug.add(norm)
+                    tta_candidates[norm] += 1
+                    break  # Only top-1
 
         # Rank by frequency
         tta_ranked = sorted(tta_candidates.items(), key=lambda x: x[1], reverse=True)
