@@ -130,7 +130,7 @@ def create_app() -> FastAPI:
 
         gradio_app = create_gradio_app()
         app = gr.mount_gradio_app(app, gradio_app, path="/demo")
-        print("[rasyn] Gradio demo mounted at /demo")
+        print("[rasyn] Gradio demo mounted at /demo (token-gated via middleware)")
     except ImportError:
         print("[rasyn] Gradio not installed — demo UI disabled.")
     except Exception as e:

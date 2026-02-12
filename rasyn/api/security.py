@@ -204,43 +204,100 @@ PUBLIC_PATHS = {
     "/redoc",
 }
 
-# Path prefixes that are public
+# Path prefixes that are public (no auth at all)
 PUBLIC_PREFIXES = (
     "/docs",
     "/redoc",
     "/openapi.json",
-    "/demo",               # Gradio demo (protected by its own auth)
 )
+
+# ---------------------------------------------------------------------------
+# Demo Auth (cookie-based so Gradio internal calls work)
+# ---------------------------------------------------------------------------
+
+_DEMO_PASSWORD = os.environ.get("RASYN_DEMO_PASS", "rasyn2026")
+_COOKIE_SECRET = os.environ.get("RASYN_COOKIE_SECRET", secrets.token_hex(32))
+_DEMO_COOKIE = "rasyn_demo_session"
+
+
+def _sign_cookie(nonce: str) -> str:
+    return hmac.new(_COOKIE_SECRET.encode(), nonce.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _make_cookie() -> str:
+    nonce = secrets.token_hex(16)
+    return f"{nonce}.{_sign_cookie(nonce)}"
+
+
+def _verify_cookie(cookie: str) -> bool:
+    try:
+        nonce, sig = cookie.split(".", 1)
+        return hmac.compare_digest(sig, _sign_cookie(nonce))
+    except (ValueError, AttributeError):
+        return False
+
+
+def _is_valid_demo_token(token: str) -> bool:
+    """Check if a demo token is valid (demo password or API key)."""
+    if hmac.compare_digest(token, _DEMO_PASSWORD):
+        return True
+    try:
+        store = get_key_store()
+        return store.validate_key(token) is not None
+    except Exception:
+        return False
+
+
+_LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rasyn Demo - Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.c{background:#1e293b;border-radius:12px;padding:40px;max-width:420px;width:90%;box-shadow:0 25px 50px rgba(0,0,0,.3)}
+h1{font-size:24px;margin-bottom:8px;color:#f8fafc}
+p{font-size:14px;color:#94a3b8;margin-bottom:24px}
+label{font-size:13px;color:#94a3b8;display:block;margin-bottom:6px}
+input{width:100%;padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#f8fafc;font-size:15px;outline:none}
+input:focus{border-color:#3b82f6}
+button{width:100%;padding:12px;border-radius:8px;border:none;margin-top:16px;background:#3b82f6;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+button:hover{background:#2563eb}
+.err{color:#f87171;font-size:13px;margin-top:12px}
+</style></head><body>
+<div class="c"><h1>Rasyn Retrosynthesis</h1>
+<p>Enter your access token or demo password to continue.</p>
+<form method="GET" action="/demo/">
+<label for="token">Access Token</label>
+<input type="password" name="token" id="token" placeholder="Enter token or password" required autofocus>
+<button type="submit">Access Demo</button>
+</form>
+__ERROR__
+</div></body></html>"""
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Require a valid API key for all non-public endpoints.
 
-    Keys are checked from:
-      1. X-API-Key header
-      2. Authorization: Bearer <key> header
-      3. ?api_key= query parameter
+    - /api/v1/* endpoints: checked via X-API-Key header / Bearer / ?api_key=
+    - /demo/* paths: checked via session cookie (set with ?token= on first visit)
+    - /api/v1/health, /docs, etc.: public
     """
 
     def __init__(self, app, api_keys: list[str] | None = None):
         super().__init__(app)
-        # Initialize the key store (seeds admin keys from env)
         self.store = get_key_store()
 
     def _extract_key(self, request: Request) -> str | None:
-        """Extract API key from request headers or query params."""
         key = request.headers.get("x-api-key")
         if key:
             return key
-
         auth = request.headers.get("authorization", "")
         if auth.startswith("Bearer "):
             return auth[7:].strip()
-
         key = request.query_params.get("api_key")
         if key:
             return key
-
         return None
 
     def _is_public(self, path: str) -> bool:
@@ -250,12 +307,54 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return True
         return False
 
+    def _handle_demo_auth(self, request: Request) -> Response | None:
+        """Handle /demo auth via cookies. Returns a Response to send, or None to proceed."""
+        # Check for ?token= in query string
+        token = request.query_params.get("token")
+        if token:
+            if _is_valid_demo_token(token):
+                # Valid → set cookie and redirect (strip token from URL)
+                resp = Response(status_code=302)
+                resp.headers["location"] = "/demo/"
+                cookie_val = _make_cookie()
+                resp.set_cookie(
+                    _DEMO_COOKIE, cookie_val,
+                    httponly=True, samesite="lax", max_age=86400 * 7,
+                )
+                return resp
+            else:
+                # Invalid token → login page with error
+                html = _LOGIN_PAGE.replace("__ERROR__", '<p class="err">Invalid token. Try again.</p>')
+                return Response(content=html, status_code=401, media_type="text/html")
+
+        # Check for valid session cookie
+        cookie = request.cookies.get(_DEMO_COOKIE)
+        if cookie and _verify_cookie(cookie):
+            return None  # Authenticated → proceed
+
+        # No auth → show login page (only for the main /demo/ page, not internal API calls)
+        # Gradio internal calls expect JSON, so return 401 JSON for those
+        if "/gradio_api/" in request.url.path:
+            return JSONResponse(status_code=401, content={"error": "not_authenticated"})
+
+        html = _LOGIN_PAGE.replace("__ERROR__", "")
+        return Response(content=html, status_code=401, media_type="text/html")
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
+        # Public paths (health, docs)
         if self._is_public(path):
             return await call_next(request)
 
+        # Demo paths — cookie-based auth
+        if path.startswith("/demo"):
+            block = self._handle_demo_auth(request)
+            if block is not None:
+                return block
+            return await call_next(request)
+
+        # API paths — key-based auth
         key = self._extract_key(request)
         if not key:
             return JSONResponse(
@@ -276,10 +375,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        # Attach key info to request state for downstream use
         request.state.api_key_info = key_info
 
-        # Admin-only endpoints
         if path.startswith("/api/v1/keys") and key_info["role"] != "admin":
             return JSONResponse(
                 status_code=403,
