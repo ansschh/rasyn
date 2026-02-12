@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Rasyn Retrosynthesis API — Production GPU infrastructure.
+  Creates VPC networking, ALB, Auto Scaling Group with GPU instance,
+  IAM roles, and CloudWatch logging.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: rasyn-prod
+    Description: Name prefix for all resources
+
+  InstanceType:
+    Type: String
+    Default: g5.xlarge
+    AllowedValues:
+      - g4dn.xlarge    # T4 16GB  — $0.53/hr
+      - g4dn.2xlarge   # T4 16GB  — $0.75/hr (more CPU/RAM)
+      - g5.xlarge      # A10G 24GB — $1.01/hr
+      - g5.2xlarge     # A10G 24GB — $1.21/hr (more CPU/RAM)
+      - p3.2xlarge     # V100 16GB — $3.06/hr
+    Description: EC2 GPU instance type
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: SSH key pair for EC2 access
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >
+      Deep Learning AMI with NVIDIA drivers + Docker.
+      Find yours: aws ec2 describe-images --owners amazon --filters
+      "Name=name,Values=Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*"
+      --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" --output text
+
+  ECRImageUri:
+    Type: String
+    Description: "Full ECR image URI (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/rasyn:latest)"
+
+  S3ModelsBucket:
+    Type: String
+    Description: S3 bucket name containing model checkpoints
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (use default VPC or an existing one)
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least 2 subnets in different AZs (for ALB)
+
+  EnableHTTPS:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable HTTPS (requires ACM certificate ARN)
+
+  ACMCertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN for HTTPS (leave empty if EnableHTTPS=false)
+
+  AllowedSSHCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: CIDR block allowed to SSH (restrict to your IP for security)
+
+Conditions:
+  UseHTTPS: !Equals [!Ref EnableHTTPS, "true"]
+
+Resources:
+  # ============================================================
+  # Security Groups
+  # ============================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} ALB"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-alb-sg"
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} EC2 GPU instances"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !GetAtt ALBSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ec2-sg"
+
+  # ============================================================
+  # IAM Role — EC2 can pull from ECR, read S3, write CloudWatch
+  # ============================================================
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: S3ModelReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3ModelsBucket}"
+                  - !Sub "arn:aws:s3:::${S3ModelsBucket}/*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-ec2-profile"
+      Roles:
+        - !Ref EC2Role
+
+  # ============================================================
+  # CloudWatch Log Group
+  # ============================================================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/rasyn/${EnvironmentName}"
+      RetentionInDays: 30
+
+  # ============================================================
+  # Application Load Balancer
+  # ============================================================
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !GetAtt ALBSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-alb"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-tg"
+      Protocol: HTTP
+      Port: 8000
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckPath: /api/v1/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      # GPU model loading takes time — give instances 10 min to become healthy
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - UseHTTPS
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseHTTPS
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # Launch Template
+  # ============================================================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-lt"
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        ImageId: !Ref AmiId
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt EC2SecurityGroup.GroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 150
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 250
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${EnvironmentName}-gpu"
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            exec > >(tee /var/log/rasyn-init.log) 2>&1
+            echo "=== Rasyn instance bootstrap starting ==="
+
+            # --- Install Docker if not present ---
+            if ! command -v docker &>/dev/null; then
+              echo "Installing Docker..."
+              apt-get update -y
+              apt-get install -y docker.io
+              systemctl enable docker
+              systemctl start docker
+            fi
+
+            # --- Install NVIDIA Container Toolkit if not present ---
+            if ! command -v nvidia-container-cli &>/dev/null; then
+              echo "Installing NVIDIA Container Toolkit..."
+              distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+              curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+              curl -s -L "https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list" | \
+                sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+                tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+              apt-get update -y
+              apt-get install -y nvidia-container-toolkit
+              nvidia-ctk runtime configure --runtime=docker
+              systemctl restart docker
+            fi
+
+            # --- Install AWS CLI if not present ---
+            if ! command -v aws &>/dev/null; then
+              echo "Installing AWS CLI..."
+              apt-get install -y unzip
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+              unzip -q /tmp/awscliv2.zip -d /tmp
+              /tmp/aws/install
+              rm -rf /tmp/aws /tmp/awscliv2.zip
+            fi
+
+            REGION=${AWS::Region}
+            ACCOUNT_ID=${AWS::AccountId}
+            ECR_IMAGE="${ECRImageUri}"
+            S3_BUCKET="${S3ModelsBucket}"
+            MODEL_DIR="/opt/rasyn/models"
+
+            # --- Login to ECR ---
+            echo "Logging into ECR..."
+            aws ecr get-login-password --region $REGION | \
+              docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+
+            # --- Pull Docker image ---
+            echo "Pulling Docker image: $ECR_IMAGE"
+            docker pull $ECR_IMAGE
+
+            # --- Download model checkpoints from S3 ---
+            echo "Downloading model checkpoints from s3://$S3_BUCKET ..."
+            mkdir -p $MODEL_DIR
+            aws s3 sync s3://$S3_BUCKET/models/ $MODEL_DIR/ --only-show-errors
+            echo "Download complete. Contents:"
+            find $MODEL_DIR -type f -exec ls -lh {} \;
+
+            # --- Run the container ---
+            echo "Starting Rasyn container..."
+            docker run -d \
+              --name rasyn \
+              --gpus all \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              -v $MODEL_DIR/checkpoints:/app/checkpoints \
+              -v $MODEL_DIR/weights:/app/weights \
+              -v $MODEL_DIR/data:/app/data \
+              -e CUDA_VISIBLE_DEVICES=0 \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=$REGION \
+              --log-opt awslogs-group=/rasyn/${EnvironmentName} \
+              --log-opt awslogs-stream=$(hostname) \
+              $ECR_IMAGE
+
+            echo "=== Rasyn instance bootstrap complete ==="
+
+  # ============================================================
+  # Auto Scaling Group (self-healing, min=max=1)
+  # ============================================================
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${EnvironmentName}-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      VPCZoneIdentifier: !Ref SubnetIds
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 600  # 10 min for model loading
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-gpu"
+          PropagateAtLaunch: true
+
+Outputs:
+  ALBEndpoint:
+    Description: API endpoint (ALB DNS)
+    Value: !Sub "http://${ALB.DNSName}"
+    Export:
+      Name: !Sub "${EnvironmentName}-endpoint"
+
+  ALBARN:
+    Description: ALB ARN (for Route 53 alias target)
+    Value: !Ref ALB
+
+  ALBHostedZoneId:
+    Description: ALB hosted zone ID (for Route 53 alias target)
+    Value: !GetAtt ALB.CanonicalHostedZoneID
+
+  SecurityGroupId:
+    Description: EC2 security group ID
+    Value: !GetAtt EC2SecurityGroup.GroupId
+
+  LogGroupName:
+    Description: CloudWatch log group
+    Value: !Ref LogGroup

@@ -1,0 +1,47 @@
+# Model weights — downloaded from S3 at runtime, not baked into image
+checkpoints/
+weights/
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# Data files
+data/raw/
+data/processed/
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Development
+.vscode/
+.idea/
+*.ipynb
+notebooks/
+scripts/
+tests/
+plots/
+figures/
+paper/
+
+# Deploy scripts (not needed inside container)
+deploy/
+docker-compose.yml
+
+# Logs
+*.log
+nul
+
+# OS
+.DS_Store
+Thumbs.db

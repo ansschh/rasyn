@@ -49,6 +49,12 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# AWS / Secrets
+rootkey.csv
+deploy/config.env
+*.pem
+
 # Misc
 *.bak
 *.tmp
+nul
