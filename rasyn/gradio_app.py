@@ -195,7 +195,6 @@ def create_gradio_app() -> gr.Blocks:
     """Create the Gradio Blocks application."""
     with gr.Blocks(
         title="Rasyn Retrosynthesis",
-        theme=gr.themes.Soft(),
     ) as demo:
         gr.Markdown(
             "# Rasyn Retrosynthesis\n"
