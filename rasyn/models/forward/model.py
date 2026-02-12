@@ -232,6 +232,9 @@ def load_forward_model(
         nhead=config.get("nhead", 8),
         num_encoder_layers=config.get("num_encoder_layers", 6),
         num_decoder_layers=config.get("num_decoder_layers", 6),
+        dim_feedforward=config.get("dim_feedforward", 2048),
+        max_seq_len=config.get("max_seq_len", 256),
+        dropout=config.get("dropout", 0.1),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
