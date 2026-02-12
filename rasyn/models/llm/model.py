@@ -176,8 +176,12 @@ def load_trained_model(checkpoint_dir: str | Path, device: str = "auto"):
     checkpoint_dir = Path(checkpoint_dir)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
 
-    # Load base model first, then LoRA
+    # Load base model first, then LoRA.
+    # load_rsgpt_model without weights_path may use a fallback tokenizer with
+    # a different vocab size. Resize embeddings to match the checkpoint tokenizer
+    # before loading the adapter weights.
     base_model, _ = load_rsgpt_model(use_lora=False)
+    base_model.resize_token_embeddings(len(tokenizer))
     model = PeftModel.from_pretrained(base_model, checkpoint_dir)
 
     if device == "auto":
