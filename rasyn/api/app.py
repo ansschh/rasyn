@@ -11,6 +11,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from rasyn.api.routes.keys import router as keys_router
 from rasyn.api.routes.molecules import router as molecules_router
 from rasyn.api.routes.retro import router as retro_router
 from rasyn.api.security import (
@@ -120,15 +121,19 @@ def create_app() -> FastAPI:
     # --- API routes ---
     app.include_router(retro_router, prefix="/api/v1")
     app.include_router(molecules_router, prefix="/api/v1/molecules")
+    app.include_router(keys_router, prefix="/api/v1")
 
     # --- Gradio demo (lazy import to avoid hard dependency) ---
     try:
         import gradio as gr
         from rasyn.gradio_app import create_gradio_app
 
-        gradio_app = create_gradio_app()
-        app = gr.mount_gradio_app(app, gradio_app, path="/demo")
-        print("[rasyn] Gradio demo mounted at /demo")
+        # Gradio has its own login (username/password) separate from API keys
+        demo_user = os.environ.get("RASYN_DEMO_USER", "rasyn")
+        demo_pass = os.environ.get("RASYN_DEMO_PASS", "rasyn2026")
+        gradio_app = create_gradio_app(auth=(demo_user, demo_pass))
+        app = gr.mount_gradio_app(app, gradio_app, path="/demo", auth_dependency=None)
+        print("[rasyn] Gradio demo mounted at /demo (login required)")
     except ImportError:
         print("[rasyn] Gradio not installed — demo UI disabled.")
     except Exception as e:

@@ -191,8 +191,12 @@ def run_validate(smiles: str):
 _pipeline_service = None
 
 
-def create_gradio_app() -> gr.Blocks:
-    """Create the Gradio Blocks application."""
+def create_gradio_app(auth: tuple[str, str] | None = None) -> gr.Blocks:
+    """Create the Gradio Blocks application.
+
+    Args:
+        auth: Optional (username, password) tuple for login protection.
+    """
     with gr.Blocks(
         title="Rasyn Retrosynthesis",
     ) as demo:
@@ -308,5 +312,9 @@ def create_gradio_app() -> gr.Blocks:
                     inputs=[val_input],
                     outputs=[val_image, val_info],
                 )
+
+    if auth:
+        demo.auth = [auth]
+        demo.auth_message = "Login to access the Rasyn demo"
 
     return demo
