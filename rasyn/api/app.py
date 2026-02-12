@@ -128,12 +128,9 @@ def create_app() -> FastAPI:
         import gradio as gr
         from rasyn.gradio_app import create_gradio_app
 
-        # Gradio has its own login (username/password) separate from API keys
-        demo_user = os.environ.get("RASYN_DEMO_USER", "rasyn")
-        demo_pass = os.environ.get("RASYN_DEMO_PASS", "rasyn2026")
-        gradio_app = create_gradio_app(auth=(demo_user, demo_pass))
-        app = gr.mount_gradio_app(app, gradio_app, path="/demo", auth_dependency=None)
-        print("[rasyn] Gradio demo mounted at /demo (login required)")
+        gradio_app = create_gradio_app()
+        app = gr.mount_gradio_app(app, gradio_app, path="/demo")
+        print("[rasyn] Gradio demo mounted at /demo")
     except ImportError:
         print("[rasyn] Gradio not installed — demo UI disabled.")
     except Exception as e:

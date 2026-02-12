@@ -346,7 +346,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Per-IP rate limiting middleware."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/api/v1/health":
+        path = request.url.path
+        # Skip rate limiting for health checks and Gradio (it makes many internal calls)
+        if path == "/api/v1/health" or path.startswith("/demo"):
             return await call_next(request)
 
         forwarded = request.headers.get("x-forwarded-for")
@@ -394,8 +396,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response: Response = await call_next(request)
 
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
+        # Only set X-Frame-Options on API routes (not /demo — Gradio uses iframes)
+        if not request.url.path.startswith("/demo"):
+            response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
 
