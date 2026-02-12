@@ -56,12 +56,15 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 
-def canonicalize_smiles(smi: str) -> str:
+def canonicalize_smiles(smi: str, remove_mapping: bool = False) -> str:
     if not RDKIT_AVAILABLE:
         return smi.strip()
     try:
         mol = Chem.MolFromSmiles(smi.strip())
         if mol is not None:
+            if remove_mapping:
+                for atom in mol.GetAtoms():
+                    atom.ClearProp("molAtomMapNumber")
             return Chem.MolToSmiles(mol)
     except Exception:
         pass
@@ -99,9 +102,9 @@ def randomize_multi(smiles_str: str, separator: str = " | ") -> str:
     return separator.join(randomized)
 
 
-def normalize_reactants(smiles_str: str) -> str:
+def normalize_reactants(smiles_str: str, remove_mapping: bool = False) -> str:
     parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
-    canon_parts = [canonicalize_smiles(p.strip()) for p in parts if p.strip()]
+    canon_parts = [canonicalize_smiles(p.strip(), remove_mapping=remove_mapping) for p in parts if p.strip()]
     canon_parts = [c for c in canon_parts if c]
     return ".".join(sorted(canon_parts))
 
@@ -133,8 +136,8 @@ def load_test_data(csv_path: Path) -> list[dict]:
                 "rxn_smiles": rxn_smiles,
                 "rxn_class": int(row.get("class", 0)),
                 "rxn_id": row.get("id", ""),
-                "product_canon": canonicalize_smiles(parts[1].strip()),
-                "gt_reactants": normalize_reactants(parts[0].strip()),
+                "product_canon": canonicalize_smiles(parts[1].strip(), remove_mapping=True),
+                "gt_reactants": normalize_reactants(parts[0].strip(), remove_mapping=True),
             })
     logger.info(f"Loaded {len(rows)} test reactions")
     return rows

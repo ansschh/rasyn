@@ -76,22 +76,25 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 
-def canonicalize_smiles(smi: str) -> str:
+def canonicalize_smiles(smi: str, remove_mapping: bool = False) -> str:
     if not RDKIT_AVAILABLE:
         return smi.strip()
     try:
         mol = Chem.MolFromSmiles(smi.strip())
         if mol is not None:
+            if remove_mapping:
+                for atom in mol.GetAtoms():
+                    atom.ClearProp("molAtomMapNumber")
             return Chem.MolToSmiles(mol)
     except Exception:
         pass
     return ""
 
 
-def normalize_reactants(smiles_str: str) -> str:
+def normalize_reactants(smiles_str: str, remove_mapping: bool = False) -> str:
     """Canonicalize and sort reactant components for comparison."""
     parts = smiles_str.replace(" . ", ".").replace(" .", ".").replace(". ", ".").split(".")
-    canon_parts = [canonicalize_smiles(p.strip()) for p in parts if p.strip()]
+    canon_parts = [canonicalize_smiles(p.strip(), remove_mapping=remove_mapping) for p in parts if p.strip()]
     canon_parts = [c for c in canon_parts if c]
     return ".".join(sorted(canon_parts))
 
@@ -141,8 +144,8 @@ def load_test_data(csv_path: Path) -> list[dict]:
             reactants_raw = parts[0].strip()
             product_raw = parts[1].strip()
 
-            product_canon = canonicalize_smiles(product_raw)
-            gt_reactants = normalize_reactants(reactants_raw)
+            product_canon = canonicalize_smiles(product_raw, remove_mapping=True)
+            gt_reactants = normalize_reactants(reactants_raw, remove_mapping=True)
 
             rows.append({
                 "rxn_smiles": rxn_smiles,
