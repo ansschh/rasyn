@@ -70,7 +70,8 @@ def load_reactions(data_path: Path) -> list[dict]:
     with open(data_path) as f:
         for line in f:
             record = json.loads(line.strip())
-            if record.get("atom_mapped_rxn_smiles"):
+            # Support both field names
+            if record.get("atom_mapped_rxn_smiles") or record.get("rxn_smiles"):
                 reactions.append(record)
     logger.info(f"Loaded {len(reactions)} reactions with atom mapping from {data_path}")
     return reactions
@@ -130,7 +131,7 @@ def main(reactions, edit_data, output, n_augments, include_non_rsmiles):
 
     with open(output_path, "w") as fout:
         for record in tqdm(rxn_records, desc="Building R-SMILES dataset"):
-            rxn_smiles = record["atom_mapped_rxn_smiles"]
+            rxn_smiles = record.get("atom_mapped_rxn_smiles") or record["rxn_smiles"]
             rxn_id = record.get("id", "")
             rxn_class = record.get("reaction_class", 0)
 
