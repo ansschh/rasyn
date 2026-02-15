@@ -17,6 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
+import click
 import torch
 from torch.utils.data import Dataset
 
@@ -83,7 +84,14 @@ class EditConditionedDataset(Dataset):
         }
 
 
-def main():
+@click.command()
+@click.option("--data", default="data/processed/uspto50k/edit_conditioned_train.jsonl",
+              help="Training data path (relative to project root)")
+@click.option("--output-dir", default="checkpoints/llm/uspto50k_v6",
+              help="Output directory for checkpoints")
+@click.option("--epochs", default=30, type=int, help="Number of training epochs")
+@click.option("--save-steps", default=2000, type=int, help="Save checkpoint every N steps")
+def main(data, output_dir, epochs, save_steps):
     from transformers import (
         AutoTokenizer,
         LlamaConfig,
@@ -96,8 +104,8 @@ def main():
     from rasyn.models.llm.tokenizer import ALL_SPECIAL_TOKENS
 
     weights_path = PROJECT_ROOT / "weights" / "rsgpt" / "finetune_50k.pth"
-    train_path = PROJECT_ROOT / "data" / "processed" / "uspto50k" / "edit_conditioned_train.jsonl"
-    output_dir = PROJECT_ROOT / "checkpoints" / "llm" / "uspto50k_v6"
+    train_path = PROJECT_ROOT / data
+    output_dir = PROJECT_ROOT / output_dir
 
     # ---------- Model ----------
     logger.info("Loading RSGPT base model...")
@@ -166,7 +174,7 @@ def main():
     # ---------- Training ----------
     training_args = TrainingArguments(
         output_dir=str(output_dir),
-        num_train_epochs=30,
+        num_train_epochs=epochs,
         per_device_train_batch_size=2,
         per_device_eval_batch_size=2,
         gradient_accumulation_steps=8,
@@ -175,7 +183,7 @@ def main():
         weight_decay=0.01,
         bf16=True,
         logging_steps=50,
-        save_steps=2000,
+        save_steps=save_steps,
         save_total_limit=5,
         report_to="none",
         lr_scheduler_type="cosine",
@@ -190,10 +198,10 @@ def main():
         train_dataset=train_dataset,
     )
 
-    logger.info("Starting V6 training (rank=64, lr=1e-4, 30 epochs)...")
+    logger.info(f"Starting V6 training (rank=64, lr=1e-4, {epochs} epochs)...")
     logger.info(f"  Train examples: {len(train_dataset)}")
     logger.info(f"  Steps per epoch: {len(train_dataset) // 16}")
-    logger.info(f"  Total steps: {len(train_dataset) // 16 * 30}")
+    logger.info(f"  Total steps: {len(train_dataset) // 16 * epochs}")
 
     trainer.train()
 
