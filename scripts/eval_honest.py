@@ -485,8 +485,10 @@ def main(
                 llm_tokenizer = AutoTokenizer.from_pretrained(str(llm_ckpt))
             else:
                 llm_tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
-                from rasyn.models.llm.model import EDIT_TOKENS
-                llm_tokenizer.add_tokens(EDIT_TOKENS, special_tokens=True)
+                from rasyn.models.llm.tokenizer import ALL_SPECIAL_TOKENS
+                new_tokens = [t for t in ALL_SPECIAL_TOKENS if t not in llm_tokenizer.get_vocab()]
+                if new_tokens:
+                    llm_tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
         else:
             from transformers import LlamaForCausalLM
             llm_model = LlamaForCausalLM.from_pretrained(str(llm_ckpt))
