@@ -541,19 +541,18 @@ def main(
         preprocessed = preprocess_for_edit_pipeline(row["rxn_smiles"], row["rxn_id"])
 
         if preprocessed is None:
-            # Edit extraction failed — we CANNOT attempt this reaction
+            # Edit extraction failed — use product-only fallback
             preprocess_failures += 1
-            for tracker in trackers.values():
-                tracker.update(gt, [], was_attempted=False)
-            continue
+            prompt = f"<PROD> {product} <EDIT> NO_DISCONNECT <OUT>"
+            synthons = ""
+        else:
+            # We have full edit conditioning
+            prompt = preprocessed["prompt"]
 
-        # We CAN attempt this reaction
-        prompt = preprocessed["prompt"]
-
-        # Parse synthons from prompt for RetroTx
-        import re
-        synth_match = re.search(r"<SYNTHONS>\s*(.+?)(?=\s*<(?:LG_HINTS|CONSTRAINTS|OUT)>)", prompt)
-        synthons = synth_match.group(1).strip() if synth_match else ""
+            # Parse synthons from prompt for RetroTx
+            import re
+            synth_match = re.search(r"<SYNTHONS>\s*(.+?)(?=\s*<(?:LG_HINTS|CONSTRAINTS|OUT)>)", prompt)
+            synthons = synth_match.group(1).strip() if synth_match else ""
 
         llm_preds = []
         retro_preds = []
