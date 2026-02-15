@@ -475,11 +475,18 @@ def main(
         from rasyn.models.llm.model import load_rsgpt_model
 
         llm_ckpt = Path(llm_checkpoint)
+        tokenizer_path = PROJECT_ROOT / "weights" / "rsgpt" / "tokenizer"
         if (llm_ckpt / "adapter_config.json").exists():
             weights_path = PROJECT_ROOT / "weights" / "rsgpt" / "finetune_50k.pth"
             base_model, _ = load_rsgpt_model(weights_path=str(weights_path), use_lora=False)
             llm_model = PeftModel.from_pretrained(base_model, str(llm_ckpt))
-            llm_tokenizer = AutoTokenizer.from_pretrained(str(llm_ckpt))
+            # Load tokenizer from checkpoint if available, else from base weights
+            if (llm_ckpt / "tokenizer_config.json").exists():
+                llm_tokenizer = AutoTokenizer.from_pretrained(str(llm_ckpt))
+            else:
+                llm_tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                from rasyn.models.llm.model import EDIT_TOKENS
+                llm_tokenizer.add_tokens(EDIT_TOKENS, special_tokens=True)
         else:
             from transformers import LlamaForCausalLM
             llm_model = LlamaForCausalLM.from_pretrained(str(llm_ckpt))
