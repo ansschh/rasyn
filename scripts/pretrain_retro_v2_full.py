@@ -9,30 +9,27 @@ Key differences from train_retro_v2.py:
   - Fewer epochs (20) — dataset is ~40x larger
   - Tokenizer built from USPTO-FULL data (superset vocab)
   - Saved tokenizer can be reused for fine-tuning
+  - bf16 mixed precision for large models (1B+ params)
+  - Gradient accumulation for effective large batch sizes
 
 Usage:
-    # Step 1: Download + preprocess USPTO-FULL
-    python -u scripts/download_data.py --datasets uspto_full
-    python -u scripts/preprocess_all.py --dataset uspto_full
+    # Fast pretrain dataset (no atom mapping):
+    python -u scripts/build_pretrain_dataset_fast.py --n-augments 3
 
-    # Step 2: Build augmented dataset (3x for FULL, not 20x — dataset already huge)
-    python -u scripts/build_augmented_dataset.py \
-        --edit-data data/processed/uspto_full/edit_conditioned_train.jsonl \
-        --reactions-data data/processed/uspto_full/reactions.jsonl \
-        --output data/processed/uspto_full/augmented_3x_train.jsonl \
-        --n-augments 3
+    # Pre-train ~1B model on H100:
+    python -u scripts/pretrain_retro_v2_full.py \
+        --data data/processed/uspto_full/pretrain_3x_train.jsonl \
+        --d-model 2048 --nhead 16 --n-layers 12 --d-ff 8192 \
+        --batch-size 32 --grad-accum 4 --bf16
 
-    # Step 3: Pre-train
-    python -u scripts/pretrain_retro_v2_full.py
-
-    # Step 4: Fine-tune on 50K
+    # Fine-tune on 50K:
     python -u scripts/train_retro_v2.py \
         --resume checkpoints/retro_v2/pretrained_full/best \
         --data data/processed/uspto50k/augmented_train.jsonl \
         --lr 1e-4 --epochs 80 --skip-sanity
 
     # RunPod
-    nohup python -u scripts/pretrain_retro_v2_full.py > pretrain_full.log 2>&1 &
+    nohup python -u scripts/pretrain_retro_v2_full.py ... > pretrain_full.log 2>&1 &
 """
 
 from __future__ import annotations
@@ -67,7 +64,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-def evaluate_pretrain(model, val_loader, tokenizer, device, max_batches=100):
+def evaluate_pretrain(model, val_loader, tokenizer, device, max_batches=100,
+                      use_amp=False, amp_dtype=torch.float32):
     """Quick validation: loss + token accuracy (no beam search for speed)."""
     model.eval()
     loss_fn = nn.NLLLoss(ignore_index=tokenizer.pad_token_id)
@@ -89,8 +87,9 @@ def evaluate_pretrain(model, val_loader, tokenizer, device, max_batches=100):
             tgt_in = tgt_ids[:, :-1]
             tgt_tgt = tgt_ids[:, 1:]
 
-            log_probs, _ = model(src_ids, tgt_in, seg_ids)
-            loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                log_probs, _ = model(src_ids, tgt_in, seg_ids)
+                loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
 
             total_loss += loss.item()
             n_batches += 1
@@ -127,11 +126,15 @@ def evaluate_pretrain(model, val_loader, tokenizer, device, max_batches=100):
               help="Smaller val split since dataset is huge")
 @click.option("--patience", default=5, type=int)
 @click.option("--eval-every", default=2, type=int)
+@click.option("--grad-accum", default=1, type=int,
+              help="Gradient accumulation steps for larger effective batch")
+@click.option("--bf16", is_flag=True, help="Use bf16 mixed precision (H100/A100)")
 @click.option("--device", default="auto")
 def main(
     data, output_dir, epochs, batch_size, lr, d_model, nhead, n_layers, d_ff,
     max_src_len, max_tgt_len, warmup_steps, label_smoothing,
-    conditioning_dropout, val_split, patience, eval_every, device,
+    conditioning_dropout, val_split, patience, eval_every,
+    grad_accum, bf16, device,
 ):
     """Pre-train RetroTransformer v2 on USPTO-FULL."""
     if device == "auto":
@@ -194,7 +197,17 @@ def main(
     model = RetroTransformerV2(**model_config).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Model parameters: {total_params:,}")
+    logger.info(f"Model parameters: {total_params:,} ({total_params/1e9:.2f}B)")
+
+    # Mixed precision setup
+    use_amp = bf16 and device == "cuda" and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    scaler = None  # bf16 doesn't need GradScaler (no inf/nan scaling issues)
+    if use_amp:
+        logger.info("Using bf16 mixed precision training")
+    else:
+        if bf16:
+            logger.warning("bf16 requested but not supported, using fp32")
 
     # Data loaders
     train_loader = DataLoader(
@@ -208,7 +221,7 @@ def main(
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    total_steps = len(train_loader) * epochs
+    total_steps = (len(train_loader) // grad_accum) * epochs
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -223,10 +236,13 @@ def main(
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     global_step = 0
+    accum_step = 0
 
-    logger.info(f"Pre-training for {epochs} epochs, {total_steps} total steps")
+    effective_batch = batch_size * grad_accum
+    logger.info(f"Pre-training for {epochs} epochs, {total_steps} optimizer steps")
     logger.info(f"  LR: {lr}, warmup: {warmup_steps}, label_smoothing: {label_smoothing}")
-    logger.info(f"  Batch size: {batch_size}, d_model: {d_model}, layers: {n_layers}")
+    logger.info(f"  Batch: {batch_size} x grad_accum={grad_accum} = {effective_batch} effective")
+    logger.info(f"  d_model: {d_model}, layers: {n_layers}, d_ff: {d_ff}, heads: {nhead}")
 
     model.train()
     start_time = time.time()
@@ -245,25 +261,24 @@ def main(
             tgt_in = tgt_ids[:, :-1]
             tgt_tgt = tgt_ids[:, 1:]
 
-            log_probs, copy_lambda = model(src_ids, tgt_in, seg_ids)
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                log_probs, copy_lambda = model(src_ids, tgt_in, seg_ids)
 
-            if label_smoothing > 0:
-                nll_loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
-                smooth_loss = -log_probs.reshape(-1, log_probs.size(-1)).mean(dim=-1)
-                mask_flat = (tgt_tgt.reshape(-1) != tokenizer.pad_token_id).float()
-                smooth_loss = (smooth_loss * mask_flat).sum() / mask_flat.sum().clamp(min=1)
-                loss = (1 - label_smoothing) * nll_loss + label_smoothing * smooth_loss
-            else:
-                loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
+                if label_smoothing > 0:
+                    nll_loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
+                    smooth_loss = -log_probs.reshape(-1, log_probs.size(-1)).mean(dim=-1)
+                    mask_flat = (tgt_tgt.reshape(-1) != tokenizer.pad_token_id).float()
+                    smooth_loss = (smooth_loss * mask_flat).sum() / mask_flat.sum().clamp(min=1)
+                    loss = (1 - label_smoothing) * nll_loss + label_smoothing * smooth_loss
+                else:
+                    loss = loss_fn(log_probs.reshape(-1, log_probs.size(-1)), tgt_tgt.reshape(-1))
 
-            optimizer.zero_grad()
+                loss = loss / grad_accum  # Scale loss for accumulation
+
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
+            accum_step += 1
 
-            global_step += 1
-            epoch_loss += loss.item()
+            epoch_loss += loss.item() * grad_accum  # Unscale for logging
             epoch_batches += 1
 
             preds = log_probs.argmax(dim=-1)
@@ -271,7 +286,15 @@ def main(
             epoch_correct += ((preds == tgt_tgt) & mask).sum().item()
             epoch_tokens += mask.sum().item()
 
-            if global_step % 200 == 0:
+            # Optimizer step every grad_accum micro-batches
+            if accum_step % grad_accum == 0:
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                global_step += 1
+
+            if accum_step % (200 * grad_accum) == 0:
                 avg_loss = epoch_loss / epoch_batches
                 token_acc = epoch_correct / max(epoch_tokens, 1)
                 current_lr = scheduler.get_last_lr()[0]
@@ -279,7 +302,7 @@ def main(
 
                 logger.info(
                     f"Step {global_step} | Epoch {epoch} | "
-                    f"loss={loss.item():.4f} | avg={avg_loss:.4f} | "
+                    f"loss={loss.item()*grad_accum:.4f} | avg={avg_loss:.4f} | "
                     f"tok_acc={token_acc:.4f} | lr={current_lr:.6f} | "
                     f"{elapsed/60:.1f}m elapsed"
                 )
@@ -287,7 +310,7 @@ def main(
                 with open(log_file, "a") as f:
                     f.write(json.dumps({
                         "step": global_step, "epoch": epoch,
-                        "loss": loss.item(), "avg_loss": avg_loss,
+                        "loss": loss.item() * grad_accum, "avg_loss": avg_loss,
                         "token_acc": token_acc, "lr": current_lr,
                     }) + "\n")
 
@@ -301,7 +324,8 @@ def main(
 
         # Validation
         if epoch % eval_every == 0:
-            metrics = evaluate_pretrain(model, val_loader, tokenizer, device)
+            metrics = evaluate_pretrain(model, val_loader, tokenizer, device,
+                                        use_amp=use_amp, amp_dtype=amp_dtype)
             logger.info(
                 f"  VAL: loss={metrics['val_loss']:.4f} tok_acc={metrics['val_token_acc']:.4f}"
             )
