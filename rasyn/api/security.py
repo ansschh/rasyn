@@ -209,6 +209,7 @@ PUBLIC_PREFIXES = (
     "/docs",
     "/redoc",
     "/openapi.json",
+    "/api/v2/",   # v2 job-based endpoints — public for frontend access
 )
 
 # ---------------------------------------------------------------------------
