@@ -1,4 +1,30 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: rasyn
+      POSTGRES_PASSWORD: rasyn
+      POSTGRES_DB: rasyn
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rasyn"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   rasyn:
     build: .
     ports:
@@ -9,6 +35,14 @@ services:
       - ./configs:/app/configs
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - DATABASE_URL=postgresql+asyncpg://rasyn:rasyn@postgres:5432/rasyn
+      - REDIS_URL=redis://redis:6379/0
+      - RASYN_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     deploy:
       resources:
         reservations:
@@ -16,3 +50,30 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  worker:
+    build: .
+    command: celery -A rasyn.worker.app worker --loglevel=info --concurrency=1
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./data:/app/data
+      - ./configs:/app/configs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - DATABASE_URL=postgresql+psycopg2://rasyn:rasyn@postgres:5432/rasyn
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  pgdata:

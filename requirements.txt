@@ -18,3 +18,12 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 gradio>=4.0.0
 Pillow>=9.0.0
+# Database + async
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.0
+# Task queue + events
+celery[redis]>=5.3.0
+redis>=5.0.0
+# SSE streaming
+sse-starlette>=1.8.0

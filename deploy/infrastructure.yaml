@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Rasyn Retrosynthesis API — Production GPU infrastructure.
-  Runs directly on EC2 (no Docker) using Deep Learning AMI.
+  Rasyn Chemistry OS — Production GPU infrastructure.
+  Runs FastAPI + Celery worker + PostgreSQL + Redis on EC2 (no Docker).
 
 Parameters:
   EnvironmentName:
@@ -147,6 +147,10 @@ Resources:
       Subnets: !Ref SubnetIds
       SecurityGroups:
         - !GetAtt ALBSecurityGroup.GroupId
+      LoadBalancerAttributes:
+        # SSE connections need longer idle timeout (default 60s is too short)
+        - Key: idle_timeout.timeout_seconds
+          Value: "300"
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -210,16 +214,49 @@ Resources:
             #!/bin/bash
             set -euo pipefail
             exec > >(tee /var/log/rasyn-init.log) 2>&1
-            echo "=== Rasyn bootstrap starting $(date) ==="
+            echo "=== Rasyn Chemistry OS bootstrap starting $(date) ==="
 
             export DEBIAN_FRONTEND=noninteractive
             APP_DIR=/opt/rasyn
-            MODEL_DIR=$APP_DIR/models
+            DB_NAME=rasyn
+            DB_USER=rasyn
+            DB_PASS=rasyn_prod_$(openssl rand -hex 8)
 
-            # --- System packages ---
+            # --- System packages + PostgreSQL 16 + Redis ---
             apt-get update -y
             apt-get install -y --no-install-recommends \
-              git python3-pip python3-venv libxrender1 libxext6 awscli
+              git python3-pip python3-venv libxrender1 libxext6 awscli \
+              curl gnupg lsb-release
+
+            # PostgreSQL 16 with pgvector
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+            apt-get update -y
+            apt-get install -y postgresql-16 postgresql-16-pgvector
+
+            # Redis
+            apt-get install -y redis-server
+
+            # --- Configure PostgreSQL ---
+            echo "Configuring PostgreSQL..."
+            systemctl enable postgresql
+            systemctl start postgresql
+
+            sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" || true
+            sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" || true
+            sudo -u postgres psql -d $DB_NAME -c "CREATE EXTENSION IF NOT EXISTS vector;" || true
+
+            # Allow local connections with password
+            PG_HBA=$(sudo -u postgres psql -t -c "SHOW hba_file;" | xargs)
+            sed -i 's/local\s\+all\s\+all\s\+peer/local   all   all   md5/' "$PG_HBA"
+            echo "host  all  all  127.0.0.1/32  md5" >> "$PG_HBA"
+            systemctl restart postgresql
+
+            # --- Configure Redis ---
+            echo "Configuring Redis..."
+            sed -i 's/^supervised no/supervised systemd/' /etc/redis/redis.conf || true
+            systemctl enable redis-server
+            systemctl restart redis-server
 
             # --- Clone repository ---
             echo "Cloning repository..."
@@ -231,10 +268,10 @@ Resources:
             python3 -m venv $APP_DIR/venv
             source $APP_DIR/venv/bin/activate
 
-            # Install PyTorch with CUDA first (the AMI may have it system-wide, but venv needs it)
+            # Install PyTorch with CUDA first
             pip install --no-cache-dir torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 
-            # Install project requirements
+            # Install project requirements (includes sqlalchemy, celery, redis, asyncpg, psycopg2)
             pip install --no-cache-dir -r requirements.txt
 
             # --- Download model checkpoints from S3 ---
@@ -248,18 +285,28 @@ Resources:
             echo "Models downloaded:"
             find $APP_DIR/app/checkpoints $APP_DIR/app/weights -type f -exec ls -lh {} \;
 
-            # --- Create systemd service ---
-            cat > /etc/systemd/system/rasyn.service <<SYSTEMD
+            # --- Save database credentials ---
+            cat > $APP_DIR/env <<ENVFILE
+            DATABASE_URL=postgresql+asyncpg://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME
+            DATABASE_URL_SYNC=postgresql+psycopg2://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME
+            REDIS_URL=redis://localhost:6379/0
+            CUDA_VISIBLE_DEVICES=0
+            RASYN_CORS_ORIGINS=*
+            ENVFILE
+
+            # --- Systemd: Rasyn API ---
+            cat > /etc/systemd/system/rasyn-api.service <<SYSTEMD
             [Unit]
-            Description=Rasyn Retrosynthesis API
-            After=network.target
+            Description=Rasyn Chemistry OS - API Server
+            After=network.target postgresql.service redis-server.service
+            Requires=postgresql.service redis-server.service
 
             [Service]
             Type=simple
             User=root
             WorkingDirectory=$APP_DIR/app
+            EnvironmentFile=$APP_DIR/env
             Environment=PATH=$APP_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-            Environment=CUDA_VISIBLE_DEVICES=0
             ExecStart=$APP_DIR/venv/bin/uvicorn rasyn.api.app:app --host 0.0.0.0 --port 8000 --workers 1
             Restart=always
             RestartSec=10
@@ -268,13 +315,44 @@ Resources:
             WantedBy=multi-user.target
             SYSTEMD
 
-            systemctl daemon-reload
-            systemctl enable rasyn
-            systemctl start rasyn
+            # --- Systemd: Celery Worker (GPU inference) ---
+            cat > /etc/systemd/system/rasyn-worker.service <<SYSTEMD
+            [Unit]
+            Description=Rasyn Chemistry OS - Celery Worker
+            After=network.target postgresql.service redis-server.service rasyn-api.service
+            Requires=postgresql.service redis-server.service
 
-            echo "=== Rasyn bootstrap complete $(date) ==="
-            echo "Service status:"
-            systemctl status rasyn --no-pager || true
+            [Service]
+            Type=simple
+            User=root
+            WorkingDirectory=$APP_DIR/app
+            EnvironmentFile=$APP_DIR/env
+            Environment=PATH=$APP_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+            ExecStart=$APP_DIR/venv/bin/celery -A rasyn.worker.app worker --loglevel=info --concurrency=1
+            Restart=always
+            RestartSec=10
+
+            [Install]
+            WantedBy=multi-user.target
+            SYSTEMD
+
+            # --- Start all services ---
+            systemctl daemon-reload
+            systemctl enable rasyn-api rasyn-worker
+            systemctl start rasyn-api
+            # Wait for API to init DB tables before starting worker
+            sleep 5
+            systemctl start rasyn-worker
+
+            echo "=== Rasyn Chemistry OS bootstrap complete $(date) ==="
+            echo ""
+            echo "Service statuses:"
+            systemctl status postgresql --no-pager || true
+            systemctl status redis-server --no-pager || true
+            systemctl status rasyn-api --no-pager || true
+            systemctl status rasyn-worker --no-pager || true
+            echo ""
+            echo "DB credentials saved to $APP_DIR/env"
 
   # ============================================================
   # Auto Scaling Group (self-healing, min=max=1)

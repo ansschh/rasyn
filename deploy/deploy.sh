@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — One-command production deployment of Rasyn to AWS.
+# deploy.sh — One-command production deployment of Rasyn Chemistry OS to AWS.
+#
+# Deploys: FastAPI + Celery worker + PostgreSQL 16 + Redis on a single GPU EC2 instance.
+# Models are downloaded from S3 at boot time.
 #
 # Prerequisites:
 #   1. AWS CLI v2 installed and configured (`aws configure`)
-#   2. Docker installed locally
-#   3. An AWS EC2 key pair created (`aws ec2 create-key-pair --key-name rasyn-key ...`)
+#   2. An AWS EC2 key pair created (`aws ec2 create-key-pair --key-name rasyn-key ...`)
 #
 # Usage:
 #   ./deploy/deploy.sh               # Interactive — prompts for missing config
@@ -45,10 +47,8 @@ fi
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-rasyn-prod}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-g5.xlarge}"
-ECR_REPO_NAME="${ECR_REPO_NAME:-rasyn}"
 S3_BUCKET="${S3_BUCKET:-rasyn-models-$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo 'ACCOUNT')}"
 KEY_PAIR_NAME="${KEY_PAIR_NAME:-}"
-DOCKER_TAG="${DOCKER_TAG:-latest}"
 
 # Paths to model files (on local machine or RunPod — user must have these)
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
@@ -68,7 +68,6 @@ check_cmd() {
 }
 
 check_cmd aws
-check_cmd docker
 
 # Verify AWS credentials
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) || {
@@ -114,47 +113,9 @@ SUBNET_IDS=$(aws ec2 describe-subnets --region "$AWS_REGION" \
 ok "Subnets: $SUBNET_IDS"
 
 # ─────────────────────────────────────────────────────────────
-# Step 1: Create ECR Repository
+# Step 1: Create S3 bucket and upload checkpoints
 # ─────────────────────────────────────────────────────────────
-step 1 "Create ECR repository"
-
-ECR_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME"
-
-if aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region "$AWS_REGION" &>/dev/null; then
-    ok "ECR repository '$ECR_REPO_NAME' already exists"
-else
-    info "Creating ECR repository '$ECR_REPO_NAME'..."
-    aws ecr create-repository \
-        --repository-name "$ECR_REPO_NAME" \
-        --region "$AWS_REGION" \
-        --image-scanning-configuration scanOnPush=true \
-        --output text > /dev/null
-    ok "ECR repository created: $ECR_URI"
-fi
-
-# ─────────────────────────────────────────────────────────────
-# Step 2: Build and push Docker image
-# ─────────────────────────────────────────────────────────────
-step 2 "Build and push Docker image"
-
-info "Logging into ECR..."
-aws ecr get-login-password --region "$AWS_REGION" | \
-    docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-
-info "Building Docker image..."
-docker build -t "$ECR_REPO_NAME:$DOCKER_TAG" "$PROJECT_ROOT"
-
-info "Tagging image..."
-docker tag "$ECR_REPO_NAME:$DOCKER_TAG" "$ECR_URI:$DOCKER_TAG"
-
-info "Pushing to ECR (this may take a few minutes)..."
-docker push "$ECR_URI:$DOCKER_TAG"
-ok "Image pushed: $ECR_URI:$DOCKER_TAG"
-
-# ─────────────────────────────────────────────────────────────
-# Step 3: Create S3 bucket and upload checkpoints
-# ─────────────────────────────────────────────────────────────
-step 3 "Create S3 bucket and upload model checkpoints"
+step 1 "Create S3 bucket and upload model checkpoints"
 
 if aws s3 ls "s3://$S3_BUCKET" &>/dev/null 2>&1; then
     ok "S3 bucket '$S3_BUCKET' already exists"
@@ -208,9 +169,9 @@ info "S3 bucket contents:"
 aws s3 ls "s3://$S3_BUCKET/models/" --recursive --human-readable --summarize 2>/dev/null | tail -5
 
 # ─────────────────────────────────────────────────────────────
-# Step 4: Find Deep Learning AMI
+# Step 2: Find Deep Learning AMI
 # ─────────────────────────────────────────────────────────────
-step 4 "Find GPU-ready AMI"
+step 2 "Find GPU-ready AMI"
 
 AMI_ID=$(aws ec2 describe-images \
     --region "$AWS_REGION" \
@@ -236,9 +197,9 @@ fi
 ok "AMI: $AMI_ID"
 
 # ─────────────────────────────────────────────────────────────
-# Step 5: Deploy CloudFormation stack
+# Step 3: Deploy CloudFormation stack
 # ─────────────────────────────────────────────────────────────
-step 5 "Deploy CloudFormation stack"
+step 3 "Deploy CloudFormation stack"
 
 STACK_NAME="$ENVIRONMENT"
 TEMPLATE="$SCRIPT_DIR/infrastructure.yaml"
@@ -246,9 +207,9 @@ TEMPLATE="$SCRIPT_DIR/infrastructure.yaml"
 info "Creating/updating CloudFormation stack '$STACK_NAME'..."
 info "  Instance type:  $INSTANCE_TYPE"
 info "  AMI:            $AMI_ID"
-info "  ECR image:      $ECR_URI:$DOCKER_TAG"
 info "  S3 bucket:      $S3_BUCKET"
 info "  Key pair:       $KEY_PAIR_NAME"
+info "  Services:       FastAPI + Celery + PostgreSQL 16 + Redis"
 
 # Check if stack exists
 if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" &>/dev/null; then
@@ -269,7 +230,6 @@ aws cloudformation $OPERATION \
         "ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE" \
         "ParameterKey=KeyPairName,ParameterValue=$KEY_PAIR_NAME" \
         "ParameterKey=AmiId,ParameterValue=$AMI_ID" \
-        "ParameterKey=ECRImageUri,ParameterValue=$ECR_URI:$DOCKER_TAG" \
         "ParameterKey=S3ModelsBucket,ParameterValue=$S3_BUCKET" \
         "ParameterKey=VpcId,ParameterValue=$VPC_ID" \
         "ParameterKey=SubnetIds,ParameterValue=\"$SUBNET_IDS\"" \
@@ -285,9 +245,9 @@ fi
 ok "Stack deployed successfully!"
 
 # ─────────────────────────────────────────────────────────────
-# Step 6: Get outputs
+# Step 4: Get outputs
 # ─────────────────────────────────────────────────────────────
-step 6 "Deployment complete!"
+step 4 "Deployment complete!"
 
 ALB_ENDPOINT=$(aws cloudformation describe-stacks \
     --stack-name "$STACK_NAME" \
@@ -302,34 +262,47 @@ LOG_GROUP=$(aws cloudformation describe-stacks \
     --output text)
 
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║           Rasyn Deployment Complete!                 ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║         Rasyn Chemistry OS — Deployment Complete!        ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  API Endpoint:    ${BLUE}$ALB_ENDPOINT${NC}"
-echo -e "  Health Check:    ${BLUE}$ALB_ENDPOINT/api/v1/health${NC}"
-echo -e "  Gradio Demo:     ${BLUE}$ALB_ENDPOINT/demo${NC}"
-echo -e "  API Docs:        ${BLUE}$ALB_ENDPOINT/docs${NC}"
-echo -e "  CloudWatch Logs: ${BLUE}$LOG_GROUP${NC}"
+echo -e "  ${BLUE}Services deployed:${NC}"
+echo -e "    FastAPI API server   (port 8000)"
+echo -e "    Celery GPU worker    (concurrency=1)"
+echo -e "    PostgreSQL 16        (pgvector enabled)"
+echo -e "    Redis 7              (pub/sub + task broker)"
 echo ""
-echo -e "  ${YELLOW}Note: The instance needs ~5-10 min to download models"
-echo -e "  and start serving. Check health endpoint until ready.${NC}"
+echo -e "  ${BLUE}Endpoints:${NC}"
+echo -e "    API v1:         ${BLUE}$ALB_ENDPOINT/api/v1/health${NC}"
+echo -e "    API v2 (jobs):  ${BLUE}$ALB_ENDPOINT/api/v2/plan${NC}"
+echo -e "    API Docs:       ${BLUE}$ALB_ENDPOINT/docs${NC}"
+echo -e "    Gradio Demo:    ${BLUE}$ALB_ENDPOINT/demo${NC}"
+echo ""
+echo -e "  ${BLUE}Frontend:${NC}"
+echo -e "    Set NEXT_PUBLIC_API_BASE=$ALB_ENDPOINT in demo/.env.local"
+echo -e "    Then: cd demo && npm run dev"
+echo ""
+echo -e "  ${BLUE}Monitoring:${NC}"
+echo -e "    CloudWatch Logs: ${BLUE}$LOG_GROUP${NC}"
+echo ""
+echo -e "  ${YELLOW}Note: The instance needs ~10-15 min to install PostgreSQL,"
+echo -e "  download models, and start serving. Check health endpoint.${NC}"
 echo ""
 
 # ─────────────────────────────────────────────────────────────
 # Save config for future use
 # ─────────────────────────────────────────────────────────────
 cat > "$SCRIPT_DIR/config.env" <<CONF
-# Rasyn AWS Deployment Config — auto-generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Rasyn Chemistry OS — AWS Deployment Config
+# Auto-generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 AWS_REGION=$AWS_REGION
 ENVIRONMENT=$ENVIRONMENT
 INSTANCE_TYPE=$INSTANCE_TYPE
-ECR_REPO_NAME=$ECR_REPO_NAME
 S3_BUCKET=$S3_BUCKET
 KEY_PAIR_NAME=$KEY_PAIR_NAME
-DOCKER_TAG=$DOCKER_TAG
 CHECKPOINT_DIR=$CHECKPOINT_DIR
 WEIGHTS_DIR=$WEIGHTS_DIR
+ALB_ENDPOINT=$ALB_ENDPOINT
 CONF
 
 ok "Config saved to $SCRIPT_DIR/config.env"

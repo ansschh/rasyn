@@ -11,6 +11,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from rasyn.api.routes.jobs import router as jobs_router
 from rasyn.api.routes.keys import router as keys_router
 from rasyn.api.routes.molecules import router as molecules_router
 from rasyn.api.routes.retro import router as retro_router
@@ -79,6 +80,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Initialize database tables
+    try:
+        from rasyn.db.init_db import init_db
+        await init_db()
+        logger.info("Database initialized.")
+    except Exception as e:
+        logger.warning(f"Database init skipped (not configured?): {e}")
+
     logger.info("Rasyn API ready.")
     yield
     logger.info("Rasyn API shutting down.")
@@ -122,6 +131,9 @@ def create_app() -> FastAPI:
     app.include_router(retro_router, prefix="/api/v1")
     app.include_router(molecules_router, prefix="/api/v1/molecules")
     app.include_router(keys_router, prefix="/api/v1")
+
+    # v2 — job-based retrosynthesis with SSE streaming
+    app.include_router(jobs_router, prefix="/api/v2")
 
     # --- Gradio demo (lazy import to avoid hard dependency) ---
     try:
