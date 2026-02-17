@@ -238,3 +238,163 @@ export async function findAlternates(
   if (!res.ok) throw new Error(`Alternates error: ${res.status}`);
   return res.json();
 }
+
+
+// ---------------------------------------------------------------------------
+// Execute Module (Slice 7)
+// ---------------------------------------------------------------------------
+
+export interface ExperimentResult {
+  id: string;
+  stepNumber: number;
+  reactionName: string;
+  product_smiles: string;
+  reactant_smiles: string[];
+  protocol: string[];
+  reagents: { name: string; role: string; equivalents: number; amount: string; mw: number }[];
+  workupChecklist: string[];
+  samples: { id: string; label: string; type: string; plannedAnalysis: string[]; status: string }[];
+  elnExportReady: boolean;
+  safety_notes: string[];
+  estimated_time: string;
+  tlc_checkpoints: string[];
+  scale: string;
+  route_id: string;
+  created_at: string;
+}
+
+/**
+ * Generate a lab-ready protocol from a route step.
+ */
+export async function generateProtocol(
+  route: ApiRoute,
+  stepIndex: number = 0,
+  scale: string = "0.5 mmol",
+): Promise<ExperimentResult> {
+  const res = await fetch(`${API_BASE}/api/v2/execute/generate-protocol`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ route, step_index: stepIndex, scale }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Protocol error: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Generate protocol from a completed job ID.
+ */
+export async function generateProtocolFromJob(
+  jobId: string,
+  stepIndex: number = 0,
+  scale: string = "0.5 mmol",
+): Promise<ExperimentResult> {
+  const params = new URLSearchParams({ step_index: String(stepIndex), scale });
+  const res = await fetch(`${API_BASE}/api/v2/execute/generate-from-job/${jobId}?${params}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Protocol error: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Export protocol as PDF.
+ */
+export async function exportProtocolPdf(
+  route: ApiRoute,
+  stepIndex: number = 0,
+  scale: string = "0.5 mmol",
+): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/api/v2/execute/export-pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ route, step_index: stepIndex, scale }),
+  });
+  if (!res.ok) throw new Error(`PDF export error: ${res.status}`);
+  return res.blob();
+}
+
+
+// ---------------------------------------------------------------------------
+// Analyze Module (Slice 8)
+// ---------------------------------------------------------------------------
+
+export interface AnalysisInterpretation {
+  conversion: number;
+  purity: number;
+  majorProductConfirmed: boolean;
+  impurities: { identity: string; percentage: number; flag?: string }[];
+  anomalies: string[];
+  summary: string;
+}
+
+export interface AnalysisFileResult {
+  id: string;
+  filename: string;
+  instrument: string;
+  sampleId: string;
+  timestamp: string;
+  fileSize: string;
+  status: "pending" | "interpreted" | "anomaly";
+  interpretation: AnalysisInterpretation | null;
+}
+
+export interface AnalysisBatchResult {
+  files: AnalysisFileResult[];
+  summary: { total: number; interpreted: number; anomalies: number; pending: number };
+}
+
+/**
+ * Upload and analyze instrument files.
+ */
+export async function uploadAndAnalyze(
+  files: File[],
+  expectedProductSmiles?: string,
+  expectedMw?: number,
+  sampleId?: string,
+): Promise<AnalysisBatchResult> {
+  const form = new FormData();
+  for (const f of files) {
+    form.append("files", f);
+  }
+  if (expectedProductSmiles) form.append("expected_product_smiles", expectedProductSmiles);
+  if (expectedMw != null) form.append("expected_mw", String(expectedMw));
+  if (sampleId) form.append("sample_id", sampleId);
+
+  const res = await fetch(`${API_BASE}/api/v2/analyze/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Analysis error: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get analysis results for a specific file.
+ */
+export async function getAnalysis(fileId: string): Promise<AnalysisFileResult> {
+  const res = await fetch(`${API_BASE}/api/v2/analyze/${fileId}`);
+  if (!res.ok) throw new Error(`Analysis fetch error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get all analyses for a sample.
+ */
+export async function getSampleAnalyses(sampleId: string): Promise<{
+  sample_id: string;
+  files: AnalysisFileResult[];
+  total: number;
+}> {
+  const res = await fetch(`${API_BASE}/api/v2/analyze/sample/${sampleId}`);
+  if (!res.ok) throw new Error(`Sample analysis error: ${res.status}`);
+  return res.json();
+}

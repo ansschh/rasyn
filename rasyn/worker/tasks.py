@@ -3,6 +3,7 @@
 Slice 1: Infrastructure + SSE events
 Slice 2: Real model inference + safety/green/evidence enrichment
 Slice 3: Multi-step planning + sourcing + scoring + discovery
+Slice 7-8: Protocol generation + instrument analysis
 """
 
 from __future__ import annotations
@@ -352,4 +353,102 @@ def run_discovery(self, job_id: str, query: str, smiles: str | None = None):
         logger.exception(f"Discovery job {job_id} failed: {error_msg}")
         _update_job(job_id, status="failed", error=error_msg)
         _emit(job_id, "failed", f"Discovery failed: {error_msg}")
+        raise self.retry(exc=exc, countdown=5) if self.request.retries < self.max_retries else None
+
+
+# ---------------------------------------------------------------------------
+# Protocol generation task (Slice 7)
+# ---------------------------------------------------------------------------
+
+@app.task(bind=True, name="rasyn.generate_protocol", max_retries=1)
+def run_protocol_generation(self, job_id: str, route: dict, step_index: int = 0,
+                             scale: str = "0.5 mmol"):
+    """Generate a lab-ready protocol from a retrosynthetic route step."""
+    t0 = time.perf_counter()
+
+    try:
+        _update_job(job_id, status="running")
+        _emit(job_id, "planning_started", "Generating experiment protocol...")
+
+        from rasyn.modules.execute import generate_experiment
+
+        _emit(job_id, "info", "Calculating stoichiometry and reagent amounts...")
+        experiment = generate_experiment(route=route, step_index=step_index, scale=scale)
+
+        _emit(job_id, "info", f"Protocol generated: {len(experiment.get('protocol', []))} steps, "
+              f"{len(experiment.get('reagents', []))} reagents")
+
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        result = {
+            "job_id": job_id,
+            "status": "completed",
+            "experiment": experiment,
+            "compute_time_ms": elapsed_ms,
+        }
+
+        _update_job(job_id, status="completed", result=result)
+        _emit(job_id, "completed",
+              f"Protocol ready — {experiment.get('id', 'EXP')}",
+              {"experiment_id": experiment.get("id")})
+
+        return result
+
+    except Exception as exc:
+        error_msg = str(exc)[:500]
+        logger.exception(f"Protocol generation {job_id} failed: {error_msg}")
+        _update_job(job_id, status="failed", error=error_msg)
+        _emit(job_id, "failed", f"Protocol generation failed: {error_msg}")
+        raise self.retry(exc=exc, countdown=5) if self.request.retries < self.max_retries else None
+
+
+# ---------------------------------------------------------------------------
+# Analysis task (Slice 8)
+# ---------------------------------------------------------------------------
+
+@app.task(bind=True, name="rasyn.analyze", max_retries=1)
+def run_analysis(self, job_id: str, file_paths: list[str],
+                  expected_product_smiles: str | None = None,
+                  expected_mw: float | None = None):
+    """Analyze uploaded instrument files."""
+    t0 = time.perf_counter()
+
+    try:
+        _update_job(job_id, status="running")
+        _emit(job_id, "planning_started",
+              f"Analyzing {len(file_paths)} instrument file(s)...")
+
+        from rasyn.modules.analyze import analyze_batch
+
+        _emit(job_id, "info", "Parsing and interpreting instrument data...")
+        result = analyze_batch(
+            file_paths,
+            expected_product_smiles=expected_product_smiles,
+            expected_mw=expected_mw,
+        )
+
+        summary = result.get("summary", {})
+        _emit(job_id, "info",
+              f"Analysis complete: {summary.get('interpreted', 0)} interpreted, "
+              f"{summary.get('anomalies', 0)} anomalies")
+
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        full_result = {
+            "job_id": job_id,
+            "status": "completed",
+            **result,
+            "compute_time_ms": elapsed_ms,
+        }
+
+        _update_job(job_id, status="completed", result=full_result)
+        _emit(job_id, "completed",
+              f"Analysis complete — {summary.get('total', 0)} files processed",
+              summary)
+
+        return full_result
+
+    except Exception as exc:
+        error_msg = str(exc)[:500]
+        logger.exception(f"Analysis job {job_id} failed: {error_msg}")
+        _update_job(job_id, status="failed", error=error_msg)
+        _emit(job_id, "failed", f"Analysis failed: {error_msg}")
         raise self.retry(exc=exc, countdown=5) if self.request.retries < self.max_retries else None

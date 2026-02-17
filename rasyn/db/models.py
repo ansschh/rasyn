@@ -158,3 +158,86 @@ class SourcingCache(Base):
     __table_args__ = (
         Index("ix_sourcing_cache_smiles", "smiles"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Experiments & Samples (Slice 7 — Execute)
+# ---------------------------------------------------------------------------
+
+class Experiment(Base):
+    __tablename__ = "experiments"
+
+    id = Column(String(32), primary_key=True)  # EXP-YYMMDD-XXXX
+    job_id = Column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    route_id = Column(String(64), nullable=True)
+    step_number = Column(Integer, nullable=True)
+    product_smiles = Column(Text, nullable=True)
+    reaction_name = Column(String(128), nullable=True)
+    scale = Column(String(32), default="0.5 mmol")
+    protocol = Column(JSONB, nullable=True)  # Full protocol data
+    reagents = Column(JSONB, nullable=True)  # Reagent table
+    workup = Column(JSONB, nullable=True)  # Workup checklist
+    status = Column(String(32), default="planned")  # planned, in_progress, completed, failed
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    samples = relationship("Sample", back_populates="experiment", order_by="Sample.id")
+
+
+class Sample(Base):
+    __tablename__ = "samples"
+
+    id = Column(String(32), primary_key=True)  # RSN-YYMMDD-XXXX
+    experiment_id = Column(
+        String(32), ForeignKey("experiments.id", ondelete="CASCADE"), nullable=False
+    )
+    label = Column(String(128), nullable=True)
+    sample_type = Column(String(32), nullable=True)  # reaction_mixture, crude, purified, fraction
+    planned_analysis = Column(JSONB, nullable=True)  # ["LCMS", "HPLC", "1H NMR"]
+    status = Column(String(32), default="pending")  # pending, submitted, analyzed
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    experiment = relationship("Experiment", back_populates="samples")
+    analysis_files = relationship("AnalysisFile", back_populates="sample")
+
+
+# ---------------------------------------------------------------------------
+# Analysis Files (Slice 8 — Analyze)
+# ---------------------------------------------------------------------------
+
+class AnalysisFile(Base):
+    __tablename__ = "analysis_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_id = Column(String(32), nullable=False, unique=True)  # FILE-XXXXXX
+    sample_id = Column(
+        String(32), ForeignKey("samples.id", ondelete="SET NULL"), nullable=True
+    )
+    filename = Column(Text, nullable=False)
+    instrument = Column(String(16), nullable=False)  # LCMS, HPLC, NMR, IR
+    file_path = Column(Text, nullable=True)  # S3 or local path
+    file_size = Column(Integer, nullable=True)
+    status = Column(String(16), default="pending")  # pending, interpreted, anomaly
+    interpretation = Column(JSONB, nullable=True)  # Full AnalysisResult
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    sample = relationship("Sample", back_populates="analysis_files")

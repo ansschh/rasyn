@@ -11,7 +11,9 @@ import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from rasyn.api.routes.analyze import router as analyze_router
 from rasyn.api.routes.discover import router as discover_router
+from rasyn.api.routes.execute import router as execute_router
 from rasyn.api.routes.jobs import router as jobs_router
 from rasyn.api.routes.keys import router as keys_router
 from rasyn.api.routes.molecules import router as molecules_router
@@ -138,6 +140,8 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router, prefix="/api/v2")
     app.include_router(discover_router, prefix="/api/v2")
     app.include_router(source_router, prefix="/api/v2")
+    app.include_router(execute_router, prefix="/api/v2")
+    app.include_router(analyze_router, prefix="/api/v2")
 
     # --- Gradio demo (lazy import to avoid hard dependency) ---
     try:

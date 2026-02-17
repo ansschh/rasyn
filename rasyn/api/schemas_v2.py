@@ -201,3 +201,89 @@ class PlanResult(BaseModel):
 class PlanStartResponse(BaseModel):
     job_id: UUID
     status: JobStatus = JobStatus.queued
+
+
+# ---------------------------------------------------------------------------
+# Execute Module (Slice 7)
+# ---------------------------------------------------------------------------
+
+class ProtocolRequest(BaseModel):
+    route: dict = Field(..., description="Route dict from PlanResult")
+    step_index: int = Field(0, ge=0, description="Step index within the route")
+    scale: str = Field("0.5 mmol", description="Reaction scale")
+
+
+class ReagentEntry(BaseModel):
+    name: str = ""
+    role: str = ""
+    equivalents: float = 0
+    amount: str = ""
+    mw: float = 0
+
+
+class SampleEntry(BaseModel):
+    id: str = ""
+    label: str = ""
+    type: str = "crude"
+    plannedAnalysis: list[str] = Field(default_factory=list)
+    status: str = "pending"
+
+
+class ExperimentResult(BaseModel):
+    id: str = ""
+    stepNumber: int = 1
+    reactionName: str = ""
+    product_smiles: str = ""
+    reactant_smiles: list[str] = Field(default_factory=list)
+    protocol: list[str] = Field(default_factory=list)
+    reagents: list[ReagentEntry] = Field(default_factory=list)
+    workupChecklist: list[str] = Field(default_factory=list)
+    samples: list[SampleEntry] = Field(default_factory=list)
+    elnExportReady: bool = False
+    safety_notes: list[str] = Field(default_factory=list)
+    estimated_time: str = ""
+    tlc_checkpoints: list[str] = Field(default_factory=list)
+    scale: str = "0.5 mmol"
+    route_id: str = ""
+    created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Analyze Module (Slice 8)
+# ---------------------------------------------------------------------------
+
+class AnalyzeUploadResponse(BaseModel):
+    task_id: str
+    files_received: int
+    status: str = "processing"
+
+
+class Impurity(BaseModel):
+    identity: str = ""
+    percentage: float = 0
+    flag: str | None = None
+
+
+class AnalysisInterpretation(BaseModel):
+    conversion: float = 0
+    purity: float = 0
+    majorProductConfirmed: bool = False
+    impurities: list[Impurity] = Field(default_factory=list)
+    anomalies: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class AnalysisFileResult(BaseModel):
+    id: str = ""
+    filename: str = ""
+    instrument: str = ""
+    sampleId: str = ""
+    timestamp: str = ""
+    fileSize: str = ""
+    status: str = "pending"
+    interpretation: AnalysisInterpretation | None = None
+
+
+class AnalysisBatchResult(BaseModel):
+    files: list[AnalysisFileResult] = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)

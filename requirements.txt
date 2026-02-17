@@ -29,3 +29,8 @@ redis>=5.0.0
 sse-starlette>=1.8.0
 # HTTP client (sourcing + discovery modules)
 httpx>=0.25.0
+# Protocol generation + PDF export
+reportlab>=4.0.0
+anthropic>=0.40.0
+# Instrument file parsing (optional)
+python-multipart>=0.0.6

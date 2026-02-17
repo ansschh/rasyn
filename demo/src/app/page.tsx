@@ -376,11 +376,16 @@ export default function Home() {
         )}
 
         {appState === "results" && activeTab === "execute" && (
-          <ExecuteView />
+          <ExecuteView
+            jobId={jobId}
+            route={liveResult?.routes?.[0] ? liveResult.routes[0] as any : null}
+          />
         )}
 
         {appState === "results" && activeTab === "analyze" && (
-          <AnalyzeView />
+          <AnalyzeView
+            productSmiles={selectedTarget.smiles}
+          />
         )}
 
         {appState === "results" && activeTab === "learn" && (
