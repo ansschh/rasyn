@@ -1,13 +1,16 @@
 #!/usr/bin/env python
 """Fast USPTO-50K indexer — downloads and indexes directly, no preprocessing needed.
 
-Downloads the USPTO-50K Schneider dataset (raw CSV), extracts product/reactant SMILES,
-computes Morgan difference fingerprints, and inserts into the reaction_index table.
+Downloads the USPTO-50K Schneider dataset (TSV from rxnfp repo), extracts clean
+reaction SMILES, computes Morgan difference fingerprints, and inserts into the
+reaction_index table.
 
 Usage:
     python scripts/index_uspto_fast.py [--batch-size 500]
 
 This is the recommended way to set up the evidence index on a fresh EC2 server.
+The live evidence search (Semantic Scholar + OpenAlex APIs) provides coverage
+beyond this local index for patents and papers across all of chemistry.
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import argparse
 import csv
 import io
 import logging
-import os
 import sys
 import time
 import urllib.request
@@ -30,36 +32,18 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# USPTO-50K dataset URL (Schneider split — the standard benchmark)
-USPTO_50K_URL = "https://raw.githubusercontent.com/Hanjun-Dai/GLN/master/data/USPTO_50k/raw_test.csv"
-USPTO_50K_URLS = {
-    "train": "https://raw.githubusercontent.com/Hanjun-Dai/GLN/master/data/USPTO_50k/raw_train.csv",
-    "val": "https://raw.githubusercontent.com/Hanjun-Dai/GLN/master/data/USPTO_50k/raw_val.csv",
-    "test": "https://raw.githubusercontent.com/Hanjun-Dai/GLN/master/data/USPTO_50k/raw_test.csv",
-}
+# Schneider USPTO-50K from rxnfp (rxn4chemistry) — reliable, clean format
+# Columns: index, original_rxn, rxn_class, source, rxn (clean SMILES), split
+SCHNEIDER_50K_URL = "https://raw.githubusercontent.com/rxn4chemistry/rxnfp/master/data/schneider50k.tsv"
 
 
-def download_csv(url: str) -> list[dict]:
-    """Download a CSV file and parse it into list of dicts."""
+def download_tsv(url: str) -> list[dict]:
+    """Download a TSV file and parse it into list of dicts."""
     logger.info(f"Downloading {url}...")
-    response = urllib.request.urlopen(url)
+    response = urllib.request.urlopen(url, timeout=60)
     content = response.read().decode("utf-8")
-    reader = csv.DictReader(io.StringIO(content))
+    reader = csv.DictReader(io.StringIO(content), delimiter="\t")
     return list(reader)
-
-
-def strip_atom_mapping(smiles: str) -> str:
-    """Strip atom mapping numbers from SMILES."""
-    try:
-        from rdkit import Chem
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return smiles
-        for atom in mol.GetAtoms():
-            atom.ClearProp("molAtomMapNumber")
-        return Chem.MolToSmiles(mol)
-    except Exception:
-        return smiles
 
 
 def compute_reaction_fp(product_smiles: str, reactants_smiles: list[str]) -> np.ndarray | None:
@@ -99,8 +83,6 @@ def pack_fingerprint(fp_array: np.ndarray) -> bytes:
 def main():
     parser = argparse.ArgumentParser(description="Download and index USPTO-50K reactions")
     parser.add_argument("--batch-size", type=int, default=500, help="DB insert batch size")
-    parser.add_argument("--splits", type=str, default="train,val,test",
-                        help="Comma-separated splits to index")
     args = parser.parse_args()
 
     # Suppress RDKit warnings
@@ -123,19 +105,16 @@ def main():
         logger.info("To re-index, run: DELETE FROM reaction_index;")
         return
 
-    # Download all splits
-    splits = [s.strip() for s in args.splits.split(",")]
-    all_rows = []
-    for split in splits:
-        url = USPTO_50K_URLS.get(split)
-        if not url:
-            logger.warning(f"Unknown split: {split}")
-            continue
-        rows = download_csv(url)
-        logger.info(f"  {split}: {len(rows)} reactions")
-        all_rows.extend(rows)
+    # Download Schneider 50K (single TSV with all splits)
+    all_rows = download_tsv(SCHNEIDER_50K_URL)
+    logger.info(f"Downloaded {len(all_rows)} reactions. Computing fingerprints and indexing...")
 
-    logger.info(f"Total: {len(all_rows)} reactions. Computing fingerprints and indexing...")
+    # Count splits
+    split_counts = {}
+    for row in all_rows:
+        s = row.get("split", "unknown")
+        split_counts[s] = split_counts.get(s, 0) + 1
+    logger.info(f"Splits: {split_counts}")
 
     t0 = time.perf_counter()
     batch = []
@@ -143,9 +122,10 @@ def main():
     skipped = 0
 
     for i, row in enumerate(all_rows):
-        # Parse reaction SMILES: "reactants>>product" format
-        rxn_smiles = row.get("reactants>reagents>production", "") or row.get("rxn_smiles", "")
-        rxn_class = row.get("class", None) or row.get("reaction_class", None)
+        # The 'rxn' column has clean (unmapped) SMILES: "reactants>>product"
+        rxn_smiles = row.get("rxn", "")
+        rxn_class = row.get("rxn_class", None)
+        patent_source = row.get("source", None)
 
         if not rxn_smiles or ">>" not in rxn_smiles:
             skipped += 1
@@ -156,14 +136,15 @@ def main():
             skipped += 1
             continue
 
-        reactants_raw = parts[0]
-        product_raw = parts[1]
+        reactants_raw = parts[0].strip()
+        product = parts[1].strip()
 
-        # Strip atom mapping
-        product = strip_atom_mapping(product_raw.strip())
-        reactant_list = [strip_atom_mapping(r.strip()) for r in reactants_raw.split(".") if r.strip()]
+        if not product or not reactants_raw:
+            skipped += 1
+            continue
 
-        if not product or not reactant_list:
+        reactant_list = [r.strip() for r in reactants_raw.split(".") if r.strip()]
+        if not reactant_list:
             skipped += 1
             continue
 
@@ -173,21 +154,13 @@ def main():
             continue
 
         fp_bytes = pack_fingerprint(fp)
-        clean_rxn = ".".join(reactant_list) + ">>" + product
-
-        # Convert class to string if it's a number
-        if rxn_class is not None:
-            try:
-                rxn_class = str(int(float(rxn_class)))
-            except (ValueError, TypeError):
-                rxn_class = str(rxn_class) if rxn_class else None
 
         batch.append(ReactionIndex(
-            reaction_smiles=clean_rxn,
+            reaction_smiles=rxn_smiles,
             product_smiles=product,
             reactants_smiles=".".join(reactant_list),
             rxn_class=rxn_class,
-            source="USPTO-50K",
+            source=f"USPTO ({patent_source})" if patent_source else "USPTO-50K",
             year=None,
             fingerprint=fp_bytes,
         ))
