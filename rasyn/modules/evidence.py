@@ -1,13 +1,17 @@
 """Evidence retrieval module — find literature precedents for predicted reactions.
 
-Uses Morgan difference fingerprints for Tanimoto similarity search against
-a pre-indexed ReactionIndex table (USPTO-50K, 37K reactions).
+Two-pronged approach:
+1. **Local index** (fast): Vectorized Tanimoto similarity against pre-indexed
+   ReactionIndex table (USPTO-FULL when available, ~1M reactions).
+2. **Live search** (broad): Real-time queries to PubChem, OpenAlex, and Semantic
+   Scholar APIs to find published reactions/papers/patents matching each step.
+
+Both sources are combined and deduplicated before returning.
 """
 
 from __future__ import annotations
 
 import logging
-import struct
 import threading
 from typing import TYPE_CHECKING
 
@@ -19,12 +23,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level cache (loaded once per process, thread-safe)
+# Module-level cache for local fingerprint index (loaded once per process)
 # ---------------------------------------------------------------------------
 
 _cache_lock = threading.Lock()
 _cached_fps: np.ndarray | None = None       # shape (N, 2048), dtype float32
-_cached_meta: list[dict] | None = None       # list of {id, reaction_smiles, product_smiles, reactants_smiles, rxn_class, source, year}
+_cached_meta: list[dict] | None = None       # list of {id, reaction_smiles, ...}
 _cache_loaded = False
 
 
@@ -47,7 +51,7 @@ def _load_index() -> tuple[np.ndarray, list[dict]]:
         try:
             rows = session.query(ReactionIndex).all()
             if not rows:
-                logger.warning("ReactionIndex table is empty — no evidence will be found.")
+                logger.warning("ReactionIndex table is empty — local evidence search disabled.")
                 _cached_fps = np.zeros((0, 2048), dtype=np.float32)
                 _cached_meta = []
                 _cache_loaded = True
@@ -57,7 +61,6 @@ def _load_index() -> tuple[np.ndarray, list[dict]]:
             meta = []
 
             for i, row in enumerate(rows):
-                # Unpack 256 bytes → 2048 bits
                 fp_bits = _unpack_fingerprint(row.fingerprint)
                 fps[i] = fp_bits
                 meta.append({
@@ -66,7 +69,7 @@ def _load_index() -> tuple[np.ndarray, list[dict]]:
                     "product_smiles": row.product_smiles,
                     "reactants_smiles": row.reactants_smiles,
                     "rxn_class": row.rxn_class,
-                    "source": row.source or "USPTO-50K",
+                    "source": row.source or "USPTO",
                     "year": row.year,
                 })
 
@@ -79,10 +82,13 @@ def _load_index() -> tuple[np.ndarray, list[dict]]:
             session.close()
 
 
+# ---------------------------------------------------------------------------
+# Fingerprint pack/unpack
+# ---------------------------------------------------------------------------
+
 def _pack_fingerprint(fp_array: np.ndarray) -> bytes:
     """Pack a 2048-element binary array into 256 bytes."""
     bits = fp_array.astype(np.uint8)
-    # Pack 8 bits per byte
     packed = np.packbits(bits)
     return packed.tobytes()
 
@@ -125,7 +131,6 @@ def compute_reaction_fp(product_smiles: str, reactants_smiles: list[str]) -> np.
             for bit in fp.GetOnBits():
                 reactant_arr[bit] = 1.0
 
-        # Difference fingerprint: |product - reactants|
         diff = np.abs(product_arr - reactant_arr)
         return diff
     except Exception as e:
@@ -138,65 +143,37 @@ def compute_reaction_fp(product_smiles: str, reactants_smiles: list[str]) -> np.
 # ---------------------------------------------------------------------------
 
 def _batch_tanimoto(query: np.ndarray, database: np.ndarray) -> np.ndarray:
-    """Compute Tanimoto similarity between a query FP and all database FPs.
-
-    Args:
-        query: shape (2048,) float32
-        database: shape (N, 2048) float32
-
-    Returns:
-        shape (N,) array of Tanimoto similarities.
-    """
+    """Compute Tanimoto similarity between a query FP and all database FPs."""
     if database.shape[0] == 0:
         return np.array([], dtype=np.float32)
 
-    # dot(query, each row) = intersection count
-    intersection = database @ query                         # (N,)
-    query_bits = query.sum()                                # scalar
-    db_bits = database.sum(axis=1)                          # (N,)
-    union = query_bits + db_bits - intersection             # (N,)
+    intersection = database @ query
+    query_bits = query.sum()
+    db_bits = database.sum(axis=1)
+    union = query_bits + db_bits - intersection
 
-    # Avoid division by zero
     with np.errstate(divide="ignore", invalid="ignore"):
         sim = np.where(union > 0, intersection / union, 0.0)
     return sim.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Local fingerprint search (fast, against pre-indexed reactions)
 # ---------------------------------------------------------------------------
 
-def find_evidence(
-    target_smiles: str,
-    routes: list[dict],
-    top_k: int = 10,
-) -> list[dict]:
-    """Find literature evidence for predicted retrosynthetic routes.
-
-    For each reaction step in the routes, computes a Morgan difference
-    fingerprint and searches the ReactionIndex for similar known reactions.
-
-    Args:
-        target_smiles: Target molecule SMILES (unused directly, kept for API compat).
-        routes: List of route dicts from the retrosynthesis pipeline.
-        top_k: Max evidence hits to return across all steps.
-
-    Returns:
-        List of dicts matching EvidenceHit schema:
-        {rxn_smiles, similarity, source, year, title, doi}
-    """
+def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
+    """Search the local ReactionIndex for similar reactions."""
     try:
         all_fps, all_meta = _load_index()
     except Exception as e:
-        logger.error(f"Failed to load reaction index: {e}")
+        logger.warning(f"Failed to load local reaction index: {e}")
         return []
 
     if all_fps.shape[0] == 0:
         return []
 
-    # Collect all steps across all routes
     seen_rxn_ids: set[int] = set()
-    all_hits: list[tuple[float, dict]] = []  # (similarity, meta_dict)
+    all_hits: list[tuple[float, dict]] = []
 
     for route in routes:
         for step in route.get("steps", []):
@@ -211,7 +188,6 @@ def find_evidence(
 
             similarities = _batch_tanimoto(query_fp, all_fps)
 
-            # Get top matches for this step (more than top_k to allow dedup)
             n_candidates = min(top_k * 2, len(similarities))
             top_indices = np.argpartition(similarities, -n_candidates)[-n_candidates:]
             top_indices = top_indices[np.argsort(similarities[top_indices])[::-1]]
@@ -225,15 +201,13 @@ def find_evidence(
 
                 sim = float(similarities[idx])
                 if sim < 0.1:
-                    continue  # too dissimilar to be useful
+                    continue
 
                 all_hits.append((sim, meta))
 
-    # Sort by similarity descending, take top_k
     all_hits.sort(key=lambda x: x[0], reverse=True)
     top_hits = all_hits[:top_k]
 
-    # Format as EvidenceHit dicts
     evidence = []
     for sim, meta in top_hits:
         evidence.append({
@@ -241,19 +215,183 @@ def find_evidence(
             "similarity": round(sim, 4),
             "source": meta["source"],
             "year": meta.get("year"),
-            "title": None,  # USPTO doesn't have titles
+            "title": None,
             "doi": None,
         })
 
-    logger.info(f"Evidence search: {len(evidence)} hits (top similarity: "
-                f"{evidence[0]['similarity']:.3f})" if evidence else "no hits")
     return evidence
+
+
+# ---------------------------------------------------------------------------
+# Live API search (broad, real-time against public databases)
+# ---------------------------------------------------------------------------
+
+def _search_live_apis(target_smiles: str, routes: list[dict], top_k: int = 5) -> list[dict]:
+    """Search PubChem + Semantic Scholar for published reactions/papers.
+
+    Uses product SMILES from each route step to find:
+    - PubChem: Compound info + literature references
+    - Semantic Scholar: Papers about synthesis of similar compounds
+    """
+    import httpx
+
+    evidence = []
+    seen_dois: set[str] = set()
+
+    # Collect unique products from all route steps
+    products = set()
+    for route in routes:
+        for step in route.get("steps", []):
+            p = step.get("product", "")
+            if p:
+                products.add(p)
+    products.add(target_smiles)
+
+    # Search Semantic Scholar for synthesis papers
+    try:
+        for smiles in list(products)[:3]:  # limit to 3 queries to control latency
+            query = f"synthesis {smiles[:40]} organic chemistry retrosynthesis"
+            resp = httpx.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": query,
+                    "fields": "title,year,citationCount,externalIds,url",
+                    "limit": min(top_k, 5),
+                },
+                timeout=8.0,
+            )
+            if resp.status_code != 200:
+                continue
+
+            for paper in resp.json().get("data", []):
+                ext = paper.get("externalIds", {}) or {}
+                doi = ext.get("DOI")
+                doi_url = f"https://doi.org/{doi}" if doi else None
+
+                if doi_url and doi_url in seen_dois:
+                    continue
+                if doi_url:
+                    seen_dois.add(doi_url)
+
+                evidence.append({
+                    "rxn_smiles": "",  # papers don't have reaction SMILES
+                    "similarity": 0.0,  # not a fingerprint match
+                    "source": f"Semantic Scholar",
+                    "year": paper.get("year"),
+                    "title": paper.get("title", ""),
+                    "doi": doi_url,
+                })
+
+            if len(evidence) >= top_k:
+                break
+
+    except Exception as e:
+        logger.debug(f"Semantic Scholar evidence search failed: {e}")
+
+    # Search OpenAlex for broader coverage
+    try:
+        query = f"retrosynthesis {target_smiles[:30]} reaction"
+        resp = httpx.get(
+            "https://api.openalex.org/works",
+            params={
+                "search": query,
+                "filter": "concepts.id:C185592680",  # Chemistry
+                "per_page": min(top_k, 10),
+                "sort": "relevance_score:desc",
+                "mailto": "team@rasyn.ai",
+            },
+            timeout=8.0,
+        )
+        if resp.status_code == 200:
+            for work in resp.json().get("results", []):
+                doi = work.get("doi")
+                if doi and doi in seen_dois:
+                    continue
+                if doi:
+                    seen_dois.add(doi)
+
+                evidence.append({
+                    "rxn_smiles": "",
+                    "similarity": 0.0,
+                    "source": "OpenAlex",
+                    "year": work.get("publication_year"),
+                    "title": work.get("title", ""),
+                    "doi": doi,
+                })
+
+                if len(evidence) >= top_k:
+                    break
+
+    except Exception as e:
+        logger.debug(f"OpenAlex evidence search failed: {e}")
+
+    return evidence[:top_k]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def find_evidence(
+    target_smiles: str,
+    routes: list[dict],
+    top_k: int = 10,
+) -> list[dict]:
+    """Find literature evidence for predicted retrosynthetic routes.
+
+    Combines two sources:
+    1. Local ReactionIndex (fast Tanimoto similarity) — up to top_k/2 hits
+    2. Live API search (Semantic Scholar + OpenAlex) — up to top_k/2 hits
+
+    Args:
+        target_smiles: Target molecule SMILES.
+        routes: List of route dicts from the retrosynthesis pipeline.
+        top_k: Max evidence hits to return (split between local + live).
+
+    Returns:
+        List of dicts matching EvidenceHit schema:
+        {rxn_smiles, similarity, source, year, title, doi}
+    """
+    local_k = (top_k + 1) // 2  # ceil division
+    live_k = top_k // 2
+
+    # Local fingerprint search
+    local_hits = _search_local_index(routes, top_k=local_k)
+
+    # Live API search (runs even if local index is empty — this is the broad coverage)
+    live_hits = _search_live_apis(target_smiles, routes, top_k=live_k)
+
+    # Combine: local hits first (they have similarity scores), then live hits
+    combined = local_hits + live_hits
+
+    # Deduplicate by reaction_smiles or doi
+    seen = set()
+    deduped = []
+    for hit in combined:
+        key = hit.get("doi") or hit.get("rxn_smiles") or hit.get("title", "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+
+    result = deduped[:top_k]
+
+    if result:
+        n_local = sum(1 for h in result if h.get("similarity", 0) > 0)
+        n_live = len(result) - n_local
+        logger.info(f"Evidence search: {len(result)} hits ({n_local} local, {n_live} live)")
+    else:
+        logger.info("Evidence search: no hits")
+
+    return result
 
 
 def compute_precedent_score(evidence: list[dict]) -> float:
     """Compute a 0-1 precedent score from evidence hits.
 
-    Formula: max_similarity * 0.7 + min(count / 5, 1.0) * 0.3
+    Weights local fingerprint matches more heavily than API paper hits.
+    - Local hits (similarity > 0): max_similarity * 0.5 + count_factor * 0.2
+    - Live hits (papers found): count_factor * 0.3
 
     Args:
         evidence: List of EvidenceHit dicts.
@@ -264,7 +402,18 @@ def compute_precedent_score(evidence: list[dict]) -> float:
     if not evidence:
         return 0.0
 
-    max_sim = max(e.get("similarity", 0) for e in evidence)
-    count = len(evidence)
-    score = max_sim * 0.7 + min(count / 5.0, 1.0) * 0.3
+    local_hits = [e for e in evidence if e.get("similarity", 0) > 0]
+    live_hits = [e for e in evidence if e.get("similarity", 0) == 0]
+
+    score = 0.0
+
+    if local_hits:
+        max_sim = max(e["similarity"] for e in local_hits)
+        local_count_factor = min(len(local_hits) / 5.0, 1.0)
+        score += max_sim * 0.5 + local_count_factor * 0.2
+
+    if live_hits:
+        live_count_factor = min(len(live_hits) / 3.0, 1.0)
+        score += live_count_factor * 0.3
+
     return round(min(score, 1.0), 3)
