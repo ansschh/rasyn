@@ -17,13 +17,19 @@ from statistics import mean
 logger = logging.getLogger(__name__)
 
 
-def score_route(route: dict, safety: dict | None = None, green: dict | None = None) -> dict:
+def score_route(
+    route: dict,
+    safety: dict | None = None,
+    green: dict | None = None,
+    evidence: list[dict] | None = None,
+) -> dict:
     """Compute composite scores for a retrosynthetic route.
 
     Args:
         route: Route dict with steps, starting_materials, etc.
         safety: Safety screening result from safety module.
         green: Green chemistry scoring result from green module.
+        evidence: List of EvidenceHit dicts from evidence module.
 
     Returns:
         Dict with per-dimension scores and overall composite score.
@@ -74,8 +80,9 @@ def score_route(route: dict, safety: dict | None = None, green: dict | None = No
         if components:
             green_score = mean(components)
 
-    # 6. Precedent score (stub — will be populated from evidence module)
-    precedent_score = 0.3
+    # 6. Precedent score — from real evidence search
+    from rasyn.modules.evidence import compute_precedent_score
+    precedent_score = compute_precedent_score(evidence or [])
 
     # Weighted composite
     weights = {
@@ -108,6 +115,7 @@ def score_and_rank_routes(
     routes: list[dict],
     safety: dict | None = None,
     green: dict | None = None,
+    evidence: list[dict] | None = None,
 ) -> list[dict]:
     """Score and re-rank all routes by composite score.
 
@@ -115,7 +123,7 @@ def score_and_rank_routes(
     Returns the sorted route list.
     """
     for route in routes:
-        scores = score_route(route, safety=safety, green=green)
+        scores = score_route(route, safety=safety, green=green, evidence=evidence)
         route["overall_score"] = scores["overall"]
         route["score_breakdown"] = scores["breakdown"]
 

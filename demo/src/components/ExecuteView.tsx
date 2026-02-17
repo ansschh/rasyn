@@ -2,11 +2,9 @@
 
 import { useState } from "react";
 import {
-  Play, FileText, FlaskConical, Clipboard, Check, CheckCircle2,
-  Download, Beaker, Tag, ExternalLink, ListChecks, TestTubes, Loader2
+  Play, FileText, FlaskConical, Check, CheckCircle2,
+  Download, Beaker, Tag, ExternalLink, ListChecks, Loader2, AlertCircle
 } from "lucide-react";
-import ActionLog from "./ActionLog";
-import { EXPERIMENT_TEMPLATE, EXECUTE_LOG_ENTRIES } from "../data/mock-pipeline";
 import type { ExperimentResult } from "../lib/api";
 
 interface Props {
@@ -16,15 +14,13 @@ interface Props {
 }
 
 export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
-  const [hasGenerated, setHasGenerated] = useState(false);
+  const [hasGenerated, setHasGenerated] = useState(!!liveExperiment);
   const [isGenerating, setIsGenerating] = useState(false);
   const [liveData, setLiveData] = useState<ExperimentResult | null>(liveExperiment ?? null);
   const [checkedItems, setCheckedItems] = useState<Set<number>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<"protocol" | "reagents" | "samples" | "workup">("protocol");
-
-  // Use live data if available, else mock
-  const exp = liveData || EXPERIMENT_TEMPLATE;
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -32,55 +28,65 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
   };
 
   const handleGenerate = async () => {
-    // Try live API first
-    if (route || jobId) {
-      setIsGenerating(true);
-      setHasGenerated(false);
-      try {
-        if (jobId) {
-          const { generateProtocolFromJob } = await import("../lib/api");
-          const result = await generateProtocolFromJob(jobId, 0, "0.5 mmol");
-          setLiveData(result);
-          setIsGenerating(false);
-          setHasGenerated(true);
-          return;
-        } else if (route) {
-          const { generateProtocol } = await import("../lib/api");
-          const result = await generateProtocol(route as any, 0, "0.5 mmol");
-          setLiveData(result);
-          setIsGenerating(false);
-          setHasGenerated(true);
-          return;
-        }
-      } catch (e) {
-        console.warn("Live protocol generation failed, falling back to demo:", e);
-      }
+    if (!route && !jobId) {
+      setError("No route or job available. Run a synthesis plan first.");
+      return;
     }
 
-    // Fallback to mock animation
     setIsGenerating(true);
-    setHasGenerated(false);
+    setError(null);
+    try {
+      if (jobId) {
+        const { generateProtocolFromJob } = await import("../lib/api");
+        const result = await generateProtocolFromJob(jobId, 0, "0.5 mmol");
+        setLiveData(result);
+        setHasGenerated(true);
+      } else if (route) {
+        const { generateProtocol } = await import("../lib/api");
+        const result = await generateProtocol(route as any, 0, "0.5 mmol");
+        setLiveData(result);
+        setHasGenerated(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Protocol generation failed");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const handleExportPdf = async () => {
-    if (route) {
-      try {
-        const { exportProtocolPdf } = await import("../lib/api");
-        const blob = await exportProtocolPdf(route as any, 0, "0.5 mmol");
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${exp.id}_protocol.pdf`;
-        a.click();
-        URL.revokeObjectURL(url);
-        showToast("PDF downloaded");
-        return;
-      } catch (e) {
-        console.warn("PDF export failed:", e);
-      }
+    if (!route) {
+      setError("No route available for PDF export");
+      return;
     }
-    showToast("PDF downloaded");
+    try {
+      const { exportProtocolPdf } = await import("../lib/api");
+      const blob = await exportProtocolPdf(route as any, 0, "0.5 mmol");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${liveData?.id || "protocol"}_protocol.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast("PDF downloaded");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PDF export failed");
+    }
   };
+
+  // No route/job available
+  if (!route && !jobId) {
+    return (
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="text-center space-y-3">
+          <FlaskConical className="w-10 h-10 text-zinc-600 mx-auto" />
+          <p className="text-sm text-zinc-400">Run a synthesis plan first to generate protocols</p>
+        </div>
+      </div>
+    );
+  }
+
+  const exp = liveData;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -92,14 +98,11 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
           </div>
           {!hasGenerated && !isGenerating && (
             <button onClick={handleGenerate} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">
-              <Play className="w-4 h-4" /> Run Step 1
+              <Play className="w-4 h-4" /> Generate Protocol
             </button>
           )}
-          {hasGenerated && (
+          {hasGenerated && exp && (
             <div className="flex items-center gap-2">
-              <button onClick={() => showToast("Exported to Dotmatics ELN")} className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 text-xs transition-colors">
-                <ExternalLink className="w-3.5 h-3.5" /> Export to ELN
-              </button>
               <button onClick={handleExportPdf} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs transition-colors">
                 <Download className="w-3.5 h-3.5" /> Download PDF
               </button>
@@ -107,27 +110,22 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
           )}
         </div>
 
-        {/* Live data indicator */}
-        {liveData && hasGenerated && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400">
-            <CheckCircle2 className="w-3.5 h-3.5" /> Live protocol generated from AI model &bull; {liveData.id}
+        {/* Error */}
+        {error && (
+          <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
           </div>
         )}
 
-        {/* Generation animation (mock path) */}
-        {isGenerating && !liveData && (
-          <ActionLog entries={EXECUTE_LOG_ENTRIES} running={true} onComplete={() => { setIsGenerating(false); setHasGenerated(true); }} />
-        )}
-
-        {/* Loading spinner (live path) */}
-        {isGenerating && liveData === null && route && (
+        {/* Loading spinner */}
+        {isGenerating && (
           <div className="flex items-center justify-center py-12 gap-3 text-zinc-400">
             <Loader2 className="w-5 h-5 animate-spin" />
             <span className="text-sm">Generating protocol from AI model...</span>
           </div>
         )}
 
-        {hasGenerated && (
+        {hasGenerated && exp && (
           <>
             {/* Experiment header */}
             <div className="flex items-center gap-4 p-4 rounded-xl bg-zinc-900 border border-zinc-800">
@@ -195,7 +193,7 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {exp.reagents.map((r: any, i: number) => (
+                    {exp.reagents.map((r, i) => (
                       <tr key={i} className="border-b border-zinc-800/50">
                         <td className="py-2.5 text-zinc-200 font-medium">{r.name}</td>
                         <td className="py-2.5 text-zinc-400">{r.role}</td>
@@ -214,7 +212,7 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
               <div className="space-y-3">
                 <div className="text-[10px] text-zinc-500 uppercase tracking-wider">Sample Tracking</div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {exp.samples.map((sample: any) => (
+                  {exp.samples.map((sample) => (
                     <div key={sample.id} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
                       <div className="flex items-center gap-2">
                         <Tag className="w-4 h-4 text-blue-400" />
@@ -222,15 +220,6 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
                       </div>
                       <div className="text-xs text-zinc-400">{sample.label}</div>
                       <div className="text-[10px] text-zinc-500 capitalize">Type: {(sample.type || "").replace(/_/g, " ")}</div>
-                      {/* Fake barcode */}
-                      <div className="flex gap-[2px] h-8 items-end">
-                        {Array.from({ length: 30 }, (_, i) => (
-                          <div key={i} className="bg-zinc-500" style={{
-                            width: Math.random() > 0.3 ? 2 : 1,
-                            height: `${60 + Math.random() * 40}%`,
-                          }} />
-                        ))}
-                      </div>
                       <div className="space-y-1">
                         <div className="text-[10px] text-zinc-500">Planned analytics:</div>
                         <div className="flex flex-wrap gap-1">

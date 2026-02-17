@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -267,4 +268,25 @@ class AuditLog(Base):
     __table_args__ = (
         Index("ix_audit_log_user_id", "user_id"),
         Index("ix_audit_log_created_at", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reaction Index (Evidence — fingerprint similarity search)
+# ---------------------------------------------------------------------------
+
+class ReactionIndex(Base):
+    __tablename__ = "reaction_index"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reaction_smiles = Column(Text, nullable=False)      # reactants>>product
+    product_smiles = Column(Text, nullable=False)
+    reactants_smiles = Column(Text, nullable=False)      # dot-separated
+    rxn_class = Column(String(64), nullable=True)
+    source = Column(String(32), nullable=False, default="USPTO-50K")
+    year = Column(Integer, nullable=True)
+    fingerprint = Column(LargeBinary, nullable=False)    # packed 2048-bit Morgan diff FP (256 bytes)
+
+    __table_args__ = (
+        Index("ix_reaction_index_rxn_class", "rxn_class"),
     )

@@ -1,8 +1,7 @@
 /**
  * Rasyn API v2 client — job-based retrosynthesis with SSE streaming.
  *
- * When API_BASE is not set or the API is unreachable, falls back to
- * demo mode (mock data from mock-data.ts).
+ * All functions throw on failure. No fallbacks — errors propagate to the UI.
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
@@ -596,5 +595,47 @@ export async function getRoles(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/api/v2/admin/roles`);
   if (!res.ok) throw new Error(`Roles error: ${res.status}`);
+  return res.json();
+}
+
+
+// ---------------------------------------------------------------------------
+// Copilot (Claude-powered chemistry chat)
+// ---------------------------------------------------------------------------
+
+export interface CopilotMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface CopilotRequest {
+  message: string;
+  context?: {
+    smiles?: string;
+    route?: ApiRoute | null;
+    constraints?: string[];
+    job_id?: string;
+  };
+  history?: CopilotMessage[];
+}
+
+export interface CopilotResponse {
+  reply: string;
+  model: string;
+}
+
+/**
+ * Chat with the AI copilot about the current route/chemistry.
+ */
+export async function chatWithCopilot(req: CopilotRequest): Promise<CopilotResponse> {
+  const res = await fetch(`${API_BASE}/api/v2/copilot/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Copilot error: ${res.status}`);
+  }
   return res.json();
 }

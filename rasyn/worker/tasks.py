@@ -135,18 +135,21 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
             routes = _run_single_step_fallback(smiles, pipeline, top_k, emit_fn=emit_fn)
 
         # --- Phase 2: Enrichment ---
-        _emit(job_id, "enriching", "Phase 2/4: Safety screening + green chemistry...")
+        _emit(job_id, "enriching", "Phase 2/5: Safety screening + green chemistry...")
         safety = _run_safety(smiles)
         green_chem = _run_green_chem(smiles, routes)
 
-        # --- Phase 3: Scoring & Ranking ---
-        _emit(job_id, "enriching", "Phase 3/4: Composite scoring and ranking...")
-        routes = _score_and_rank(routes, safety, green_chem)
-
-        # --- Phase 4: Sourcing + Discovery ---
-        _emit(job_id, "enriching", "Phase 4/4: Sourcing lookups + literature search...")
-        sourcing = _run_sourcing(routes)
+        # --- Phase 3: Evidence search (needed for precedent scoring) ---
+        _emit(job_id, "enriching", "Phase 3/5: Literature evidence search...")
         evidence = _run_evidence(smiles, routes)
+
+        # --- Phase 4: Scoring & Ranking (uses evidence for precedent score) ---
+        _emit(job_id, "enriching", "Phase 4/5: Composite scoring and ranking...")
+        routes = _score_and_rank(routes, safety, green_chem, evidence)
+
+        # --- Phase 5: Sourcing + Discovery ---
+        _emit(job_id, "enriching", "Phase 5/5: Sourcing lookups + literature search...")
+        sourcing = _run_sourcing(routes)
         discovery = _run_discovery(smiles)
 
         # --- Build final PlanResult ---
@@ -217,11 +220,12 @@ def _run_evidence(smiles: str, routes: list[dict]) -> list[dict]:
         return []
 
 
-def _score_and_rank(routes: list[dict], safety: dict | None, green: dict | None) -> list[dict]:
+def _score_and_rank(routes: list[dict], safety: dict | None, green: dict | None,
+                    evidence: list[dict] | None = None) -> list[dict]:
     """Score and re-rank routes using composite scoring."""
     try:
         from rasyn.modules.scoring import score_and_rank_routes
-        return score_and_rank_routes(routes, safety=safety, green=green)
+        return score_and_rank_routes(routes, safety=safety, green=green, evidence=evidence)
     except Exception as e:
         logger.warning(f"Scoring failed: {e}")
         return routes

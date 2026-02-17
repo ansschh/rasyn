@@ -2,30 +2,32 @@
 
 import { useState, useEffect } from "react";
 import {
-  Shield, Users, Activity, Link2, CheckCircle2, Clock, Lock,
-  Server, Globe, FileText, Eye, AlertTriangle, Loader2
+  Shield, Users, Activity, Lock,
+  Server, Globe, Eye, AlertTriangle, Loader2, AlertCircle
 } from "lucide-react";
-import { AUDIT_LOG, INTEGRATIONS } from "../data/mock-pipeline";
 import type { AuditLogResponse } from "../lib/api";
 
 export default function AdminPanel() {
-  const [activeSection, setActiveSection] = useState<"audit" | "integrations" | "security">("audit");
+  const [activeSection, setActiveSection] = useState<"audit" | "security">("audit");
   const [liveAuditLog, setLiveAuditLog] = useState<AuditLogResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Load live audit log on mount
   useEffect(() => {
     let cancelled = false;
     async function fetchAuditLog() {
       setIsLoading(true);
+      setError(null);
       try {
         const { getAuditLog } = await import("../lib/api");
         const result = await getAuditLog(100);
-        if (!cancelled && result.entries.length > 0) {
+        if (!cancelled) {
           setLiveAuditLog(result);
         }
-      } catch {
-        // Fall back to mock
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load audit log");
+        }
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -34,9 +36,6 @@ export default function AdminPanel() {
     return () => { cancelled = true; };
   }, []);
 
-  // Use live data if available, else mock
-  const auditEntries = liveAuditLog?.entries || AUDIT_LOG;
-
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="max-w-4xl mx-auto space-y-6">
@@ -44,13 +43,13 @@ export default function AdminPanel() {
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Shield className="w-5 h-5 text-blue-400" /> Administration
           </h2>
-          <p className="text-xs text-zinc-500">Enterprise controls: SSO, audit trail, permissions, and integrations</p>
+          <p className="text-xs text-zinc-500">Enterprise controls: SSO, audit trail, permissions</p>
         </div>
 
-        {/* Live data indicator */}
-        {liveAuditLog && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-xs text-blue-400">
-            <CheckCircle2 className="w-3.5 h-3.5" /> Live audit log &bull; {liveAuditLog.total} total events
+        {/* Error */}
+        {error && (
+          <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
           </div>
         )}
 
@@ -58,7 +57,6 @@ export default function AdminPanel() {
         <div className="flex border-b border-zinc-800">
           {([
             { id: "audit" as const, icon: Activity, label: "Audit Log" },
-            { id: "integrations" as const, icon: Link2, label: "Integrations" },
             { id: "security" as const, icon: Lock, label: "Security" },
           ]).map(tab => (
             <button
@@ -78,92 +76,58 @@ export default function AdminPanel() {
         {/* Audit Log */}
         {activeSection === "audit" && (
           <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-zinc-500">
-              <span>{auditEntries.length} events</span>
-              <span>{liveAuditLog ? "Live from API" : "Last 48 hours"}</span>
-            </div>
             {isLoading && (
-              <div className="flex items-center justify-center py-4 gap-2 text-zinc-400 text-xs">
+              <div className="flex items-center justify-center py-8 gap-2 text-zinc-400 text-xs">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading audit log...
               </div>
             )}
-            <div className="bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-zinc-800 text-zinc-500">
-                    <th className="text-left p-3 font-medium">Timestamp</th>
-                    <th className="text-left p-3 font-medium">User</th>
-                    <th className="text-left p-3 font-medium">Action</th>
-                    <th className="text-left p-3 font-medium">Resource</th>
-                    <th className="text-left p-3 font-medium">Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditEntries.map((entry: any, i: number) => (
-                    <tr key={entry.id || i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
-                      <td className="p-3 text-zinc-400 font-mono whitespace-nowrap">{entry.timestamp}</td>
-                      <td className="p-3 text-zinc-300">{entry.user}</td>
-                      <td className="p-3">
-                        <span className={`inline-flex items-center gap-1 ${
-                          (entry.action || "").includes("anomaly") || (entry.action || "").includes("Flagged") || (entry.action || "").includes("BLOCKED") ? "text-amber-400" :
-                          entry.user === "System (Auto)" || entry.user === "api_user" ? "text-blue-400" : "text-zinc-200"
-                        }`}>
-                          {(entry.action || "").includes("anomaly") || (entry.action || "").includes("Flagged") || (entry.action || "").includes("BLOCKED") ? <AlertTriangle className="w-3 h-3" /> :
-                           entry.user === "System (Auto)" || entry.user === "api_user" ? <Activity className="w-3 h-3" /> :
-                           <Eye className="w-3 h-3" />}
-                          {entry.action}
-                        </span>
-                      </td>
-                      <td className="p-3 text-zinc-400 max-w-[200px] truncate">{entry.resource}</td>
-                      <td className="p-3 text-zinc-500 max-w-[200px] truncate">{entry.details}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* Integrations */}
-        {activeSection === "integrations" && (
-          <div className="space-y-4">
-            {["ELN", "Sourcing", "Instruments", "Enterprise", "Deployment"].map(category => {
-              const items = INTEGRATIONS.filter(i => i.category === category);
-              if (items.length === 0) return null;
-              return (
-                <div key={category}>
-                  <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">{category}</div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {items.map(item => (
-                      <div key={item.name} className="flex items-center gap-3 p-3 rounded-xl bg-zinc-900 border border-zinc-800">
-                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${
-                          item.status === "connected" ? "bg-emerald-500/15" :
-                          item.status === "available" ? "bg-blue-500/15" : "bg-zinc-500/15"
-                        }`}>
-                          <Link2 className={`w-4 h-4 ${
-                            item.status === "connected" ? "text-emerald-400" :
-                            item.status === "available" ? "text-blue-400" : "text-zinc-500"
-                          }`} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium text-zinc-200">{item.name}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
-                              item.status === "connected" ? "text-emerald-400 bg-emerald-500/15 border-emerald-500/30" :
-                              item.status === "available" ? "text-blue-400 bg-blue-500/15 border-blue-500/30" :
-                              "text-zinc-500 bg-zinc-500/15 border-zinc-500/30"
-                            }`}>
-                              {item.status === "connected" ? "Connected" : item.status === "available" ? "Available" : "Coming Soon"}
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-zinc-500 mt-0.5 truncate">{item.description}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+            {liveAuditLog && (
+              <>
+                <div className="flex items-center justify-between text-xs text-zinc-500">
+                  <span>{liveAuditLog.entries.length} events</span>
+                  <span>{liveAuditLog.total} total</span>
                 </div>
-              );
-            })}
+                <div className="bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-zinc-800 text-zinc-500">
+                        <th className="text-left p-3 font-medium">Timestamp</th>
+                        <th className="text-left p-3 font-medium">User</th>
+                        <th className="text-left p-3 font-medium">Action</th>
+                        <th className="text-left p-3 font-medium">Resource</th>
+                        <th className="text-left p-3 font-medium">Details</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liveAuditLog.entries.map((entry, i) => (
+                        <tr key={entry.id || i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+                          <td className="p-3 text-zinc-400 font-mono whitespace-nowrap">{entry.timestamp}</td>
+                          <td className="p-3 text-zinc-300">{entry.user}</td>
+                          <td className="p-3">
+                            <span className={`inline-flex items-center gap-1 ${
+                              (entry.action || "").includes("anomaly") || (entry.action || "").includes("Flagged") || (entry.action || "").includes("BLOCKED") ? "text-amber-400" :
+                              entry.user === "System (Auto)" || entry.user === "api_user" ? "text-blue-400" : "text-zinc-200"
+                            }`}>
+                              {(entry.action || "").includes("anomaly") || (entry.action || "").includes("Flagged") || (entry.action || "").includes("BLOCKED") ? <AlertTriangle className="w-3 h-3" /> :
+                               entry.user === "System (Auto)" || entry.user === "api_user" ? <Activity className="w-3 h-3" /> :
+                               <Eye className="w-3 h-3" />}
+                              {entry.action}
+                            </span>
+                          </td>
+                          <td className="p-3 text-zinc-400 max-w-[200px] truncate">{entry.resource}</td>
+                          <td className="p-3 text-zinc-500 max-w-[200px] truncate">{entry.details}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+            {!isLoading && !liveAuditLog && !error && (
+              <div className="text-center py-8 text-zinc-500 text-sm">
+                No audit log entries found.
+              </div>
+            )}
           </div>
         )}
 
