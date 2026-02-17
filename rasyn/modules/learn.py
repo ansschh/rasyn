@@ -126,14 +126,14 @@ def record_outcome(
                     select(Reaction).where(
                         Reaction.product_smiles == exp.product_smiles
                     ).order_by(Reaction.created_at.desc())
-                ).scalar_first()
+                ).scalars().first()
         elif reaction_smiles:
             # Find by reaction SMILES
             rxn = session.execute(
                 select(Reaction).where(
                     Reaction.reaction_smiles == reaction_smiles
                 ).order_by(Reaction.created_at.desc())
-            ).scalar_first()
+            ).scalars().first()
 
         if rxn is None:
             # Create a new reaction record if none found
