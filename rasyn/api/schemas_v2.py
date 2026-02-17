@@ -287,3 +287,117 @@ class AnalysisFileResult(BaseModel):
 class AnalysisBatchResult(BaseModel):
     files: list[AnalysisFileResult] = Field(default_factory=list)
     summary: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Learn Module (Slice 9)
+# ---------------------------------------------------------------------------
+
+class OutcomeRequest(BaseModel):
+    reaction_id: int | None = Field(None, description="Reaction DB ID (if known)")
+    experiment_id: str | None = Field(None, description="Experiment ID (EXP-YYMMDD-XXXX)")
+    reaction_smiles: str | None = Field(None, description="Reaction SMILES (reactants>>product)")
+    outcome: str = Field(..., description="success, failure, or partial")
+    actual_yield: float | None = Field(None, ge=0, le=100, description="Actual yield %")
+    failure_reason: str | None = Field(None, description="Reason for failure if applicable")
+    conditions: dict | None = Field(None, description="Conditions used")
+    notes: str | None = Field(None, description="Free-text notes")
+
+
+class OutcomeResponse(BaseModel):
+    reaction_id: int
+    outcome: str
+    insights_generated: int = 0
+    message: str = "Outcome recorded"
+
+
+class Insight(BaseModel):
+    id: str = ""
+    type: str = "optimization"  # failure_avoidance, optimization, preference
+    rule: str = ""
+    source: str = ""
+    confidence: float = 0
+    timesApplied: int = 0
+
+
+class InsightsResponse(BaseModel):
+    insights: list[Insight] = Field(default_factory=list)
+    total_experiments: int = 0
+    total_applications: int = 0
+
+
+class RankingFactor(BaseModel):
+    factor: str = ""
+    value: str = ""
+    impact: str = "neutral"  # positive, negative, neutral
+    detail: str = ""
+
+
+class RankingExplanation(BaseModel):
+    question: str = ""
+    factors: list[RankingFactor] = Field(default_factory=list)
+
+
+class PastExperimentEntry(BaseModel):
+    id: str = ""
+    date: str = ""
+    target: str = ""
+    reaction: str = ""
+    conditions: str = ""
+    outcome: str = "partial"
+    yield_pct: float | None = None
+    notes: str = ""
+    scaffold: str = ""
+    impactOnPlanning: str = ""
+
+
+class LearnStatsResponse(BaseModel):
+    total_experiments: int = 0
+    total_reactions: int = 0
+    success_rate: float = 0
+    avg_yield: float | None = None
+    total_insights: int = 0
+    past_experiments: list[PastExperimentEntry] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Admin Module (Slice 10)
+# ---------------------------------------------------------------------------
+
+class AuditLogEntry(BaseModel):
+    id: int = 0
+    timestamp: str = ""
+    user: str = ""
+    action: str = ""
+    resource: str = ""
+    details: str | None = None
+    ip_address: str | None = None
+    status_code: int | None = None
+
+
+class AuditLogResponse(BaseModel):
+    entries: list[AuditLogEntry] = Field(default_factory=list)
+    total: int = 0
+
+
+class GuardrailCheckRequest(BaseModel):
+    smiles: str = Field(..., description="SMILES to check against guardrails")
+
+
+class GuardrailAlert(BaseModel):
+    category: str = ""  # controlled_substance, explosive_precursor, chemical_weapon, etc.
+    name: str = ""
+    severity: str = "high"
+    description: str = ""
+
+
+class GuardrailCheckResponse(BaseModel):
+    smiles: str = ""
+    blocked: bool = False
+    alerts: list[GuardrailAlert] = Field(default_factory=list)
+    requires_review: bool = True  # always true for safety
+
+
+class PermissionInfo(BaseModel):
+    role: str = ""
+    permissions: list[str] = Field(default_factory=list)

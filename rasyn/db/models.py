@@ -241,3 +241,30 @@ class AnalysisFile(Base):
     )
 
     sample = relationship("Sample", back_populates="analysis_files")
+
+
+# ---------------------------------------------------------------------------
+# Audit Log (Slice 10 — Admin)
+# ---------------------------------------------------------------------------
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(128), nullable=True)  # username or "system"
+    user_name = Column(String(256), nullable=True)
+    action = Column(String(128), nullable=False)   # e.g. "POST /api/v2/plan"
+    resource = Column(Text, nullable=True)          # e.g. "/api/v2/plan"
+    details = Column(Text, nullable=True)           # Human-readable detail
+    ip_address = Column(String(64), nullable=True)
+    status_code = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_audit_log_user_id", "user_id"),
+        Index("ix_audit_log_created_at", "created_at"),
+    )

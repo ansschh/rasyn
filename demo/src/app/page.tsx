@@ -389,7 +389,10 @@ export default function Home() {
         )}
 
         {appState === "results" && activeTab === "learn" && (
-          <LearnView />
+          <LearnView
+            jobId={jobId}
+            targetSmiles={selectedTarget.smiles}
+          />
         )}
 
         {appState === "results" && activeTab === "admin" && (

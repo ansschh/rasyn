@@ -398,3 +398,203 @@ export async function getSampleAnalyses(sampleId: string): Promise<{
   if (!res.ok) throw new Error(`Sample analysis error: ${res.status}`);
   return res.json();
 }
+
+
+// ---------------------------------------------------------------------------
+// Learn Module (Slice 9)
+// ---------------------------------------------------------------------------
+
+export interface Insight {
+  id: string;
+  type: string;
+  rule: string;
+  source: string;
+  confidence: number;
+  timesApplied: number;
+}
+
+export interface InsightsResponse {
+  insights: Insight[];
+  total_experiments: number;
+  total_applications: number;
+}
+
+export interface RankingFactor {
+  factor: string;
+  value: string;
+  impact: string;
+  detail: string;
+}
+
+export interface RankingExplanation {
+  question: string;
+  factors: RankingFactor[];
+}
+
+export interface PastExperimentEntry {
+  id: string;
+  date: string;
+  target: string;
+  reaction: string;
+  conditions: string;
+  outcome: string;
+  yield: string | null;
+  notes: string;
+  scaffold: string;
+  impactOnPlanning: string;
+}
+
+export interface LearnStatsResponse {
+  total_experiments: number;
+  total_reactions: number;
+  success_rate: number;
+  avg_yield: number | null;
+  total_insights: number;
+  past_experiments: PastExperimentEntry[];
+}
+
+export interface OutcomeRequest {
+  reaction_id?: number | null;
+  experiment_id?: string | null;
+  reaction_smiles?: string | null;
+  outcome: string;
+  actual_yield?: number | null;
+  failure_reason?: string | null;
+  conditions?: Record<string, unknown> | null;
+  notes?: string | null;
+}
+
+export interface OutcomeResponse {
+  reaction_id: number;
+  outcome: string;
+  insights_generated: number;
+  message: string;
+}
+
+/**
+ * Record outcome of an experiment.
+ */
+export async function recordOutcome(req: OutcomeRequest): Promise<OutcomeResponse> {
+  const res = await fetch(`${API_BASE}/api/v2/learn/record-outcome`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(`Record outcome error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get insights from institutional memory.
+ */
+export async function getInsights(
+  targetSmiles?: string | null
+): Promise<InsightsResponse> {
+  const params = new URLSearchParams();
+  if (targetSmiles) params.set("target_smiles", targetSmiles);
+  const res = await fetch(`${API_BASE}/api/v2/learn/insights?${params}`);
+  if (!res.ok) throw new Error(`Insights error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get ranking explanation for a route.
+ */
+export async function getRankingExplanation(
+  jobId: string,
+  routeIndex: number = 0
+): Promise<RankingExplanation> {
+  const params = new URLSearchParams({
+    job_id: jobId,
+    route_index: String(routeIndex),
+  });
+  const res = await fetch(`${API_BASE}/api/v2/learn/explain-ranking?${params}`);
+  if (!res.ok) throw new Error(`Ranking explanation error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get past experiments with outcomes.
+ */
+export async function getPastExperiments(
+  limit: number = 50
+): Promise<LearnStatsResponse> {
+  const res = await fetch(`${API_BASE}/api/v2/learn/experiments?limit=${limit}`);
+  if (!res.ok) throw new Error(`Past experiments error: ${res.status}`);
+  return res.json();
+}
+
+
+// ---------------------------------------------------------------------------
+// Admin Module (Slice 10)
+// ---------------------------------------------------------------------------
+
+export interface AuditLogEntry {
+  id: number;
+  timestamp: string;
+  user: string;
+  action: string;
+  resource: string;
+  details: string | null;
+  ip_address: string | null;
+  status_code: number | null;
+}
+
+export interface AuditLogResponse {
+  entries: AuditLogEntry[];
+  total: number;
+}
+
+export interface GuardrailAlert {
+  category: string;
+  name: string;
+  severity: string;
+  description: string;
+}
+
+export interface GuardrailCheckResponse {
+  smiles: string;
+  blocked: boolean;
+  alerts: GuardrailAlert[];
+  requires_review: boolean;
+}
+
+/**
+ * Get audit log entries.
+ */
+export async function getAuditLog(
+  limit: number = 100,
+  offset: number = 0
+): Promise<AuditLogResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const res = await fetch(`${API_BASE}/api/v2/admin/audit-log?${params}`);
+  if (!res.ok) throw new Error(`Audit log error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Check guardrails for a molecule.
+ */
+export async function checkGuardrails(smiles: string): Promise<GuardrailCheckResponse> {
+  const res = await fetch(`${API_BASE}/api/v2/admin/guardrails-check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ smiles }),
+  });
+  if (!res.ok) throw new Error(`Guardrails check error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get roles and permissions.
+ */
+export async function getRoles(): Promise<{
+  roles: { role: string; permission_count: number; permissions: string[] }[];
+}> {
+  const res = await fetch(`${API_BASE}/api/v2/admin/roles`);
+  if (!res.ok) throw new Error(`Roles error: ${res.status}`);
+  return res.json();
+}

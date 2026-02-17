@@ -11,14 +11,17 @@ import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from rasyn.api.routes.admin import router as admin_router
 from rasyn.api.routes.analyze import router as analyze_router
 from rasyn.api.routes.discover import router as discover_router
 from rasyn.api.routes.execute import router as execute_router
 from rasyn.api.routes.jobs import router as jobs_router
 from rasyn.api.routes.keys import router as keys_router
+from rasyn.api.routes.learn import router as learn_router
 from rasyn.api.routes.molecules import router as molecules_router
 from rasyn.api.routes.retro import router as retro_router
 from rasyn.api.routes.source import router as source_router
+from rasyn.api.audit_middleware import AuditMiddleware
 from rasyn.api.security import (
     APIKeyMiddleware,
     RateLimitMiddleware,
@@ -128,7 +131,10 @@ def create_app() -> FastAPI:
     # 3. Rate limiting
     app.add_middleware(RateLimitMiddleware)
 
-    # 4. API key authentication (outermost — runs first)
+    # 4. Audit logging (records all API calls)
+    app.add_middleware(AuditMiddleware)
+
+    # 5. API key authentication (outermost — runs first)
     app.add_middleware(APIKeyMiddleware)
 
     # --- API routes ---
@@ -142,6 +148,8 @@ def create_app() -> FastAPI:
     app.include_router(source_router, prefix="/api/v2")
     app.include_router(execute_router, prefix="/api/v2")
     app.include_router(analyze_router, prefix="/api/v2")
+    app.include_router(learn_router, prefix="/api/v2")
+    app.include_router(admin_router, prefix="/api/v2")
 
     # --- Gradio demo (lazy import to avoid hard dependency) ---
     try:
