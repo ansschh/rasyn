@@ -372,7 +372,7 @@ export default function Home() {
 
         {/* Results: tab-dependent views */}
         {appState === "results" && activeTab === "discover" && (
-          <DiscoverView targetName={selectedTarget.name} />
+          <DiscoverView targetName={selectedTarget.name} smiles={selectedTarget.smiles} liveData={liveResult?.discovery ?? null} />
         )}
 
         {appState === "results" && activeTab === "execute" && (
@@ -392,7 +392,7 @@ export default function Home() {
         )}
 
         {appState === "results" && activeTab === "source" && (
-          <SourceView items={SHOPPING_LIST_OSIM} />
+          <SourceView items={SHOPPING_LIST_OSIM} liveSourcing={liveResult?.sourcing ?? null} />
         )}
 
         {/* Plan tab: 3-pane layout */}

@@ -73,6 +73,7 @@ export function useJobStream(jobId: string | null): UseJobStreamReturn {
       "model_running",
       "step_complete",
       "enriching",
+      "info",
       "warning",
       "completed",
       "failed",

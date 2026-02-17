@@ -54,11 +54,21 @@ class Step(BaseModel):
     conditions: dict | None = Field(None, description="Predicted conditions")
 
 
+class ScoreBreakdown(BaseModel):
+    roundtrip_confidence: float | None = None
+    step_efficiency: float | None = None
+    availability: float | None = None
+    safety: float | None = None
+    green_chemistry: float | None = None
+    precedent: float | None = None
+
+
 class Route(BaseModel):
     route_id: str = Field(..., description="Unique route identifier")
     rank: int = Field(..., description="Rank (1 = best)")
     steps: list[Step] = Field(..., description="Retrosynthetic steps")
     overall_score: float = Field(..., description="Combined route score 0-1")
+    score_breakdown: ScoreBreakdown | None = Field(None, description="Per-dimension score breakdown")
     num_steps: int = Field(..., description="Total number of steps")
     starting_materials: list[str] = Field(
         default_factory=list, description="Terminal starting materials SMILES"
@@ -150,6 +160,25 @@ class JobEvent(BaseModel):
 # PlanResult — the main contract
 # ---------------------------------------------------------------------------
 
+class DiscoveryPaper(BaseModel):
+    title: str = ""
+    authors: str | None = None
+    year: int | None = None
+    doi: str | None = None
+    citation_count: int = 0
+    source: str = "unknown"
+    journal: str | None = None
+    abstract: str | None = None
+    url: str | None = None
+
+
+class DiscoveryResult(BaseModel):
+    papers: list[DiscoveryPaper] = Field(default_factory=list)
+    compound_info: dict = Field(default_factory=dict)
+    sources_queried: list[str] = Field(default_factory=list)
+    total_results: int = 0
+
+
 class PlanResult(BaseModel):
     job_id: UUID
     smiles: str
@@ -159,6 +188,7 @@ class PlanResult(BaseModel):
     evidence: list[EvidenceHit] = Field(default_factory=list)
     green_chem: GreenChemResult | None = None
     sourcing: SourcingResult | None = None
+    discovery: DiscoveryResult | None = None
     compute_time_ms: float | None = None
     error: str | None = None
     created_at: datetime | None = None

@@ -28,9 +28,19 @@ export interface PlanResult {
   evidence: EvidenceHit[];
   green_chem: GreenChemResult | null;
   sourcing: SourcingResult | null;
+  discovery: DiscoveryResult | null;
   compute_time_ms: number | null;
   error: string | null;
   created_at: string | null;
+}
+
+export interface ScoreBreakdown {
+  roundtrip_confidence: number | null;
+  step_efficiency: number | null;
+  availability: number | null;
+  safety: number | null;
+  green_chemistry: number | null;
+  precedent: number | null;
 }
 
 export interface ApiRoute {
@@ -38,6 +48,7 @@ export interface ApiRoute {
   rank: number;
   steps: ApiStep[];
   overall_score: number;
+  score_breakdown: ScoreBreakdown | null;
   num_steps: number;
   starting_materials: string[];
   all_purchasable: boolean;
@@ -85,10 +96,38 @@ export interface SourcingResult {
   items: {
     smiles: string;
     vendor: string | null;
+    catalog_id: string | null;
     price_per_gram: number | null;
+    lead_time_days: number | null;
     in_stock: boolean;
+    url: string | null;
   }[];
   total_estimated_cost: number | null;
+  summary: {
+    total_compounds: number;
+    available: number;
+    not_available: number;
+    in_stock_offers: number;
+  } | null;
+}
+
+export interface DiscoveryPaper {
+  title: string;
+  authors: string | null;
+  year: number | null;
+  doi: string | null;
+  citation_count: number;
+  source: string;
+  journal: string | null;
+  abstract: string | null;
+  url: string | null;
+}
+
+export interface DiscoveryResult {
+  papers: DiscoveryPaper[];
+  compound_info: Record<string, unknown>;
+  sources_queried: string[];
+  total_results: number;
 }
 
 /**
@@ -138,4 +177,64 @@ export async function checkApiHealth(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Get sourcing quotes for a list of compounds.
+ */
+export async function getSourcingQuotes(smilesList: string[]): Promise<SourcingResult> {
+  const res = await fetch(`${API_BASE}/api/v2/source/quote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ smiles_list: smilesList }),
+  });
+  if (!res.ok) throw new Error(`Sourcing error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Start a literature discovery search.
+ */
+export async function startDiscovery(
+  query: string,
+  smiles?: string | null
+): Promise<{ job_id: string; status: string }> {
+  const res = await fetch(`${API_BASE}/api/v2/discover/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, smiles, max_results: 20 }),
+  });
+  if (!res.ok) throw new Error(`Discovery error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Quick synchronous discovery search (no job queue).
+ */
+export async function quickDiscovery(
+  query: string,
+  smiles?: string | null,
+  maxResults: number = 10
+): Promise<DiscoveryResult> {
+  const params = new URLSearchParams({ query, max_results: String(maxResults) });
+  if (smiles) params.set("smiles", smiles);
+  const res = await fetch(`${API_BASE}/api/v2/discover/quick?${params}`);
+  if (!res.ok) throw new Error(`Discovery error: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Find alternate building blocks for an unavailable compound.
+ */
+export async function findAlternates(
+  smiles: string,
+  topK: number = 5
+): Promise<{ query_smiles: string; alternates: { smiles: string; similarity: number; source: string }[] }> {
+  const res = await fetch(`${API_BASE}/api/v2/source/alternates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ smiles, top_k: topK }),
+  });
+  if (!res.ok) throw new Error(`Alternates error: ${res.status}`);
+  return res.json();
 }

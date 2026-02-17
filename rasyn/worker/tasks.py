@@ -1,7 +1,8 @@
 """Celery tasks for retrosynthesis jobs.
 
-Slice 1: Full infrastructure with mock chemistry to validate the pipeline.
-Slice 2: Real model inference via PipelineService + enrichment modules.
+Slice 1: Infrastructure + SSE events
+Slice 2: Real model inference + safety/green/evidence enrichment
+Slice 3: Multi-step planning + sourcing + scoring + discovery
 """
 
 from __future__ import annotations
@@ -88,14 +89,18 @@ def _emit(job_id: str, kind: str, message: str = "", data: dict | None = None) -
 
 
 # ---------------------------------------------------------------------------
-# Main retrosynthesis task
+# Main retrosynthesis task (Slice 3: multi-step + full enrichment)
 # ---------------------------------------------------------------------------
 
 @app.task(bind=True, name="rasyn.retrosynthesis", max_retries=1)
-def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5, models: list | None = None):
+def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
+                       models: list | None = None, use_multistep: bool = True):
     """Run retrosynthesis for a given target molecule.
 
     Produces SSE events throughout execution and saves PlanResult to the DB.
+
+    Slice 3 upgrade: Uses multi-step A* search with combined model expansion,
+    composite scoring, sourcing lookups, and literature discovery.
     """
     models = models or ["retro_v2", "llm"]
     t0 = time.perf_counter()
@@ -105,70 +110,43 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5, models: l
         _update_job(job_id, status="running")
         _emit(job_id, "planning_started", f"Starting retrosynthesis for {smiles[:50]}...")
 
-        # --- Run models ---
         pipeline = _get_pipeline()
-        all_predictions = []
 
-        if "llm" in models:
-            _emit(job_id, "model_running", "Running RSGPT-3.2B (LLM) model...")
-            try:
-                llm_results = pipeline._run_llm_pipeline(smiles, top_k, use_verification=True)
-                all_predictions.extend(llm_results)
-                _emit(job_id, "step_complete", f"LLM produced {len(llm_results)} predictions", {"model": "llm", "count": len(llm_results)})
-            except Exception as e:
-                logger.warning(f"LLM pipeline failed: {e}")
-                _emit(job_id, "warning", f"LLM model failed: {str(e)[:100]}")
+        # --- Phase 1: Route Planning ---
+        def emit_fn(kind, message="", data=None):
+            _emit(job_id, kind, message, data)
 
-        if "retro_v2" in models:
-            _emit(job_id, "model_running", "Running RetroTransformer v2 (69.7% top-1)...")
-            try:
-                retro_results = pipeline._run_retro_pipeline(smiles, top_k)
-                all_predictions.extend(retro_results)
-                _emit(job_id, "step_complete", f"RetroTx v2 produced {len(retro_results)} predictions", {"model": "retro_v2", "count": len(retro_results)})
-            except Exception as e:
-                logger.warning(f"RetroTx v2 pipeline failed: {e}")
-                _emit(job_id, "warning", f"RetroTx v2 model failed: {str(e)[:100]}")
+        if use_multistep:
+            _emit(job_id, "info", "Phase 1/4: Multi-step route planning (A* search)...")
+            from rasyn.modules.planner import run_multistep_planning
+            routes = run_multistep_planning(
+                target_smiles=smiles,
+                pipeline_service=pipeline,
+                top_k=top_k,
+                max_depth=6,
+                max_time=90.0,
+                emit_fn=emit_fn,
+            )
+        else:
+            # Fallback: single-step only (as in Slice 2)
+            _emit(job_id, "info", "Phase 1/4: Single-step retrosynthesis...")
+            from rasyn.modules.planner import _run_single_step_fallback
+            routes = _run_single_step_fallback(smiles, pipeline, top_k, emit_fn=emit_fn)
 
-        # --- Deduplicate & rank ---
-        _emit(job_id, "enriching", "Deduplicating and ranking predictions...")
-        seen = set()
-        deduped = []
-        for pred in all_predictions:
-            key = ".".join(sorted(pred.get("reactants_smiles", [])))
-            if key and key not in seen:
-                seen.add(key)
-                deduped.append(pred)
-        deduped = deduped[:top_k]
-
-        # Build routes (each single-step prediction = 1 route for now)
-        routes = []
-        for i, pred in enumerate(deduped):
-            routes.append({
-                "route_id": f"route_{i+1}",
-                "rank": i + 1,
-                "steps": [{
-                    "product": smiles,
-                    "reactants": pred.get("reactants_smiles", []),
-                    "model": pred.get("model_source", "unknown"),
-                    "score": pred.get("confidence", 0.5),
-                    "rxn_class": None,
-                    "conditions": None,
-                }],
-                "overall_score": pred.get("confidence", 0.5),
-                "num_steps": 1,
-                "starting_materials": pred.get("reactants_smiles", []),
-                "all_purchasable": False,
-            })
-
-        # --- Enrichment ---
-        _emit(job_id, "enriching", "Running safety screening (PAINS/BRENK)...")
+        # --- Phase 2: Enrichment ---
+        _emit(job_id, "enriching", "Phase 2/4: Safety screening + green chemistry...")
         safety = _run_safety(smiles)
-
-        _emit(job_id, "enriching", "Computing green chemistry metrics...")
         green_chem = _run_green_chem(smiles, routes)
 
-        _emit(job_id, "enriching", "Searching literature evidence...")
+        # --- Phase 3: Scoring & Ranking ---
+        _emit(job_id, "enriching", "Phase 3/4: Composite scoring and ranking...")
+        routes = _score_and_rank(routes, safety, green_chem)
+
+        # --- Phase 4: Sourcing + Discovery ---
+        _emit(job_id, "enriching", "Phase 4/4: Sourcing lookups + literature search...")
+        sourcing = _run_sourcing(routes)
         evidence = _run_evidence(smiles, routes)
+        discovery = _run_discovery(smiles)
 
         # --- Build final PlanResult ---
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -180,14 +158,18 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5, models: l
             "safety": safety,
             "evidence": evidence,
             "green_chem": green_chem,
-            "sourcing": None,  # TODO: Slice 3
+            "sourcing": sourcing,
+            "discovery": discovery,
             "compute_time_ms": elapsed_ms,
             "error": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
         _update_job(job_id, status="completed", result=result)
-        _emit(job_id, "completed", f"Retrosynthesis complete — {len(routes)} routes in {elapsed_ms:.0f}ms", {"routes_count": len(routes)})
+        _save_routes_to_db(job_id, routes)
+        _emit(job_id, "completed",
+              f"Retrosynthesis complete — {len(routes)} routes in {elapsed_ms:.0f}ms",
+              {"routes_count": len(routes), "compute_time_ms": elapsed_ms})
 
         return result
 
@@ -201,7 +183,7 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5, models: l
 
 
 # ---------------------------------------------------------------------------
-# Enrichment helpers (Slice 2)
+# Enrichment helpers
 # ---------------------------------------------------------------------------
 
 def _run_safety(smiles: str) -> dict | None:
@@ -232,3 +214,142 @@ def _run_evidence(smiles: str, routes: list[dict]) -> list[dict]:
     except Exception as e:
         logger.warning(f"Evidence search failed: {e}")
         return []
+
+
+def _score_and_rank(routes: list[dict], safety: dict | None, green: dict | None) -> list[dict]:
+    """Score and re-rank routes using composite scoring."""
+    try:
+        from rasyn.modules.scoring import score_and_rank_routes
+        return score_and_rank_routes(routes, safety=safety, green=green)
+    except Exception as e:
+        logger.warning(f"Scoring failed: {e}")
+        return routes
+
+
+def _run_sourcing(routes: list[dict]) -> dict | None:
+    """Look up sourcing for starting materials across all routes."""
+    try:
+        from rasyn.modules.sourcing import search_vendors
+
+        # Collect all unique starting materials across routes
+        all_sm = set()
+        for route in routes:
+            for sm in route.get("starting_materials", []):
+                if sm:
+                    all_sm.add(sm)
+
+        if not all_sm:
+            return None
+
+        result = search_vendors(list(all_sm), timeout=8.0)
+
+        # Mark routes as purchasable based on results
+        available_smiles = set()
+        for item in result.get("items", []):
+            if item.get("in_stock"):
+                available_smiles.add(item["smiles"])
+
+        for route in routes:
+            sm = set(route.get("starting_materials", []))
+            if sm and sm.issubset(available_smiles):
+                route["all_purchasable"] = True
+
+        return result
+    except Exception as e:
+        logger.warning(f"Sourcing lookup failed: {e}")
+        return None
+
+
+def _run_discovery(smiles: str) -> dict | None:
+    """Run literature discovery for the target molecule."""
+    try:
+        from rasyn.modules.discover import search_literature_sync
+
+        # Build a query from the SMILES
+        query = f"retrosynthesis {smiles[:30]} organic chemistry synthesis"
+        result = search_literature_sync(query, smiles=smiles, max_results=10, timeout=10.0)
+        return result
+    except Exception as e:
+        logger.warning(f"Literature discovery failed: {e}")
+        return None
+
+
+def _save_routes_to_db(job_id: str, routes: list[dict]) -> None:
+    """Persist route and reaction data to the database."""
+    try:
+        from rasyn.db.models import Route as RouteModel, Reaction
+
+        session = _get_db_session()
+        try:
+            for route in routes:
+                route_row = RouteModel(
+                    job_id=uuid.UUID(job_id),
+                    route_id=route.get("route_id", "route_1"),
+                    rank=route.get("rank", 1),
+                    tree=route,
+                    score=route.get("overall_score"),
+                    score_breakdown=route.get("score_breakdown"),
+                    num_steps=route.get("num_steps", 0),
+                    all_purchasable=route.get("all_purchasable", False),
+                )
+                session.add(route_row)
+                session.flush()
+
+                for j, step in enumerate(route.get("steps", [])):
+                    rxn = Reaction(
+                        route_id=route_row.id,
+                        step_number=j + 1,
+                        product_smiles=step.get("product", ""),
+                        reactants_smiles=".".join(step.get("reactants", [])),
+                        reaction_smiles=".".join(step.get("reactants", [])) + ">>" + step.get("product", ""),
+                        model_source=step.get("model"),
+                        confidence=step.get("score"),
+                    )
+                    session.add(rxn)
+
+            session.commit()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"Failed to save routes to DB: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Discovery search task (standalone, for /api/v2/discover endpoint)
+# ---------------------------------------------------------------------------
+
+@app.task(bind=True, name="rasyn.discover", max_retries=1)
+def run_discovery(self, job_id: str, query: str, smiles: str | None = None):
+    """Run literature discovery as a standalone job."""
+    t0 = time.perf_counter()
+
+    try:
+        _update_job(job_id, status="running")
+        _emit(job_id, "planning_started", f"Searching literature for: {query[:80]}...")
+
+        from rasyn.modules.discover import search_literature_sync
+        result = search_literature_sync(query, smiles=smiles, max_results=20, timeout=15.0)
+
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        full_result = {
+            "job_id": job_id,
+            "query": query,
+            "smiles": smiles,
+            "status": "completed",
+            **result,
+            "compute_time_ms": elapsed_ms,
+        }
+
+        _update_job(job_id, status="completed", result=full_result)
+        _emit(job_id, "completed",
+              f"Found {result.get('total_results', 0)} papers in {elapsed_ms:.0f}ms",
+              {"total_results": result.get("total_results", 0)})
+
+        return full_result
+
+    except Exception as exc:
+        error_msg = str(exc)[:500]
+        logger.exception(f"Discovery job {job_id} failed: {error_msg}")
+        _update_job(job_id, status="failed", error=error_msg)
+        _emit(job_id, "failed", f"Discovery failed: {error_msg}")
+        raise self.retry(exc=exc, countdown=5) if self.request.retries < self.max_retries else None
