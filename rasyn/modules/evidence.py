@@ -2,9 +2,10 @@
 
 Two-pronged approach:
 1. **Local index** (fast): Vectorized Tanimoto similarity against pre-indexed
-   ReactionIndex table (USPTO-FULL when available, ~1M reactions).
-2. **Live search** (broad): Real-time queries to PubChem, OpenAlex, and Semantic
-   Scholar APIs to find published reactions/papers/patents matching each step.
+   ReactionIndex table (USPTO-FULL ~1.8M reactions).
+   Uses packed binary fingerprints (256 bytes each) for memory efficiency.
+2. **Live search** (broad): Real-time queries to Semantic Scholar and OpenAlex
+   APIs to find published reactions/papers/patents matching each step.
 
 Both sources are combined and deduplicated before returning.
 """
@@ -12,6 +13,7 @@ Both sources are combined and deduplicated before returning.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import TYPE_CHECKING
 
@@ -23,25 +25,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Popcount lookup table for uint8 — used for packed Tanimoto
+# ---------------------------------------------------------------------------
+_POPCOUNT_U8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.float32)
+
+# ---------------------------------------------------------------------------
 # Module-level cache for local fingerprint index (loaded once per process)
+# Uses packed uint8 arrays: 256 bytes per FP → ~460 MB for 1.8M reactions
+# (vs ~14.7 GB for unpacked float32)
 # ---------------------------------------------------------------------------
 
 _cache_lock = threading.Lock()
-_cached_fps: np.ndarray | None = None       # shape (N, 2048), dtype float32
-_cached_meta: list[dict] | None = None       # list of {id, reaction_smiles, ...}
+_cached_fps_packed: np.ndarray | None = None   # shape (N, 256), dtype uint8
+_cached_bitcounts: np.ndarray | None = None     # shape (N,), dtype float32 — precomputed popcount per FP
+_cached_meta: list[dict] | None = None
 _cache_loaded = False
 
 
-def _load_index() -> tuple[np.ndarray, list[dict]]:
-    """Load all reaction fingerprints from the DB into a numpy array.
+def _load_index() -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """Load all reaction fingerprints from the DB into packed numpy arrays.
 
-    Returns (fps_array, meta_list). Caches result for the process lifetime.
+    Returns (fps_packed, bitcounts, meta_list). Caches for process lifetime.
+    Memory: ~460 MB for 1.8M reactions (packed uint8).
     """
-    global _cached_fps, _cached_meta, _cache_loaded
+    global _cached_fps_packed, _cached_bitcounts, _cached_meta, _cache_loaded
 
     with _cache_lock:
-        if _cache_loaded and _cached_fps is not None:
-            return _cached_fps, _cached_meta  # type: ignore[return-value]
+        if _cache_loaded and _cached_fps_packed is not None:
+            return _cached_fps_packed, _cached_bitcounts, _cached_meta  # type: ignore[return-value]
 
         from sqlalchemy.orm import Session
         from rasyn.db.engine import sync_engine
@@ -49,35 +60,68 @@ def _load_index() -> tuple[np.ndarray, list[dict]]:
 
         session = Session(sync_engine)
         try:
-            rows = session.query(ReactionIndex).all()
-            if not rows:
+            count = session.query(ReactionIndex).count()
+            if count == 0:
                 logger.warning("ReactionIndex table is empty — local evidence search disabled.")
-                _cached_fps = np.zeros((0, 2048), dtype=np.float32)
+                _cached_fps_packed = np.zeros((0, 256), dtype=np.uint8)
+                _cached_bitcounts = np.zeros(0, dtype=np.float32)
                 _cached_meta = []
                 _cache_loaded = True
-                return _cached_fps, _cached_meta
+                return _cached_fps_packed, _cached_bitcounts, _cached_meta
 
-            fps = np.zeros((len(rows), 2048), dtype=np.float32)
+            logger.info(f"Loading {count:,} reaction fingerprints (packed)...")
+
+            # Load in batches to avoid OOM on very large tables
+            BATCH = 100_000
+            fps_list = []
             meta = []
+            offset = 0
 
-            for i, row in enumerate(rows):
-                fp_bits = _unpack_fingerprint(row.fingerprint)
-                fps[i] = fp_bits
-                meta.append({
-                    "id": row.id,
-                    "reaction_smiles": row.reaction_smiles,
-                    "product_smiles": row.product_smiles,
-                    "reactants_smiles": row.reactants_smiles,
-                    "rxn_class": row.rxn_class,
-                    "source": row.source or "USPTO",
-                    "year": row.year,
-                })
+            while True:
+                rows = (
+                    session.query(ReactionIndex)
+                    .order_by(ReactionIndex.id)
+                    .offset(offset)
+                    .limit(BATCH)
+                    .all()
+                )
+                if not rows:
+                    break
 
-            _cached_fps = fps
+                batch_fps = np.zeros((len(rows), 256), dtype=np.uint8)
+                for i, row in enumerate(rows):
+                    packed = np.frombuffer(row.fingerprint, dtype=np.uint8)
+                    batch_fps[i, :len(packed)] = packed[:256]
+                    meta.append({
+                        "id": row.id,
+                        "reaction_smiles": row.reaction_smiles,
+                        "product_smiles": row.product_smiles,
+                        "reactants_smiles": row.reactants_smiles,
+                        "rxn_class": row.rxn_class,
+                        "source": row.source or "USPTO",
+                        "year": row.year,
+                    })
+
+                fps_list.append(batch_fps)
+                offset += len(rows)
+                logger.info(f"  Loaded {offset:,}/{count:,} fingerprints...")
+
+                if len(rows) < BATCH:
+                    break
+
+            fps_packed = np.vstack(fps_list) if fps_list else np.zeros((0, 256), dtype=np.uint8)
+
+            # Precompute bitcounts for all FPs (used in Tanimoto denominator)
+            bitcounts = _POPCOUNT_U8[fps_packed].sum(axis=1)
+
+            _cached_fps_packed = fps_packed
+            _cached_bitcounts = bitcounts
             _cached_meta = meta
             _cache_loaded = True
-            logger.info(f"Loaded {len(rows)} reaction fingerprints into evidence cache.")
-            return _cached_fps, _cached_meta
+
+            mem_mb = fps_packed.nbytes / 1024 / 1024
+            logger.info(f"Loaded {len(meta):,} fingerprints into evidence cache ({mem_mb:.0f} MB packed).")
+            return _cached_fps_packed, _cached_bitcounts, _cached_meta
         finally:
             session.close()
 
@@ -139,18 +183,34 @@ def compute_reaction_fp(product_smiles: str, reactants_smiles: list[str]) -> np.
 
 
 # ---------------------------------------------------------------------------
-# Vectorized Tanimoto similarity
+# Packed Tanimoto similarity (memory-efficient for 1.8M+ reactions)
 # ---------------------------------------------------------------------------
 
-def _batch_tanimoto(query: np.ndarray, database: np.ndarray) -> np.ndarray:
-    """Compute Tanimoto similarity between a query FP and all database FPs."""
-    if database.shape[0] == 0:
+def _batch_tanimoto_packed(query_packed: np.ndarray, db_packed: np.ndarray,
+                           db_bitcounts: np.ndarray) -> np.ndarray:
+    """Compute Tanimoto similarity using packed uint8 fingerprints.
+
+    Uses popcount lookup table — no unpacking needed.
+
+    Args:
+        query_packed: shape (256,) uint8 — packed query fingerprint
+        db_packed: shape (N, 256) uint8 — packed database fingerprints
+        db_bitcounts: shape (N,) float32 — precomputed popcount for each DB FP
+
+    Returns:
+        shape (N,) float32 — Tanimoto similarities
+    """
+    if db_packed.shape[0] == 0:
         return np.array([], dtype=np.float32)
 
-    intersection = database @ query
-    query_bits = query.sum()
-    db_bits = database.sum(axis=1)
-    union = query_bits + db_bits - intersection
+    # Intersection: popcount(query & db) for each row
+    intersection = _POPCOUNT_U8[query_packed & db_packed].sum(axis=1)
+
+    # Query bitcount
+    query_bits = _POPCOUNT_U8[query_packed].sum()
+
+    # Union = |A| + |B| - |A & B|
+    union = query_bits + db_bitcounts - intersection
 
     with np.errstate(divide="ignore", invalid="ignore"):
         sim = np.where(union > 0, intersection / union, 0.0)
@@ -164,12 +224,12 @@ def _batch_tanimoto(query: np.ndarray, database: np.ndarray) -> np.ndarray:
 def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
     """Search the local ReactionIndex for similar reactions."""
     try:
-        all_fps, all_meta = _load_index()
+        all_fps_packed, all_bitcounts, all_meta = _load_index()
     except Exception as e:
         logger.warning(f"Failed to load local reaction index: {e}")
         return []
 
-    if all_fps.shape[0] == 0:
+    if all_fps_packed.shape[0] == 0:
         return []
 
     seen_rxn_ids: set[int] = set()
@@ -186,7 +246,10 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
             if query_fp is None:
                 continue
 
-            similarities = _batch_tanimoto(query_fp, all_fps)
+            # Pack the query for packed Tanimoto
+            query_packed = np.packbits(query_fp.astype(np.uint8))
+
+            similarities = _batch_tanimoto_packed(query_packed, all_fps_packed, all_bitcounts)
 
             n_candidates = min(top_k * 2, len(similarities))
             top_indices = np.argpartition(similarities, -n_candidates)[-n_candidates:]
@@ -215,8 +278,7 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
         patent_url = None
         patent_number = None
         if "USPTO" in source:
-            import re
-            # Match "US08551963" or bare "05523424" (8-digit patent number)
+            # Match "US08551963" or bare "05523424" (7-8 digit patent number)
             m = re.search(r'US(\d+)', source)
             if m:
                 patent_number = f"US{m.group(1)}"
@@ -244,11 +306,11 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _search_live_apis(target_smiles: str, routes: list[dict], top_k: int = 5) -> list[dict]:
-    """Search PubChem + Semantic Scholar for published reactions/papers.
+    """Search Semantic Scholar + OpenAlex for published reactions/papers.
 
     Uses product SMILES from each route step to find:
-    - PubChem: Compound info + literature references
     - Semantic Scholar: Papers about synthesis of similar compounds
+    - OpenAlex: Broader chemistry literature coverage
     """
     import httpx
 
@@ -293,7 +355,7 @@ def _search_live_apis(target_smiles: str, routes: list[dict], top_k: int = 5) ->
                 evidence.append({
                     "rxn_smiles": "",  # papers don't have reaction SMILES
                     "similarity": 0.0,  # not a fingerprint match
-                    "source": f"Semantic Scholar",
+                    "source": "Semantic Scholar",
                     "year": paper.get("year"),
                     "title": paper.get("title", ""),
                     "doi": doi_url,
