@@ -216,10 +216,16 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
         patent_number = None
         if "USPTO" in source:
             import re
-            m = re.search(r'US\d+', source)
+            # Match "US08551963" or bare "05523424" (8-digit patent number)
+            m = re.search(r'US(\d+)', source)
             if m:
-                patent_number = m.group(0)
+                patent_number = f"US{m.group(1)}"
                 patent_url = f"https://patents.google.com/patent/{patent_number}"
+            else:
+                m = re.search(r'\((\d{7,8})\)', source)
+                if m:
+                    patent_number = f"US{m.group(1)}"
+                    patent_url = f"https://patents.google.com/patent/{patent_number}"
 
         evidence.append({
             "rxn_smiles": meta["reaction_smiles"],
