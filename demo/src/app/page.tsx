@@ -626,34 +626,85 @@ export default function Home() {
                 {/* Evidence Tab */}
                 {rightTab === "evidence" && (
                   <div className="space-y-4">
-                    {evidence.length > 0 ? (
-                      <>
-                        <div className="text-xs text-zinc-500 mb-3">
-                          {evidence.length} precedent reactions found via fingerprint similarity search
-                        </div>
-                        {evidence.sort((a, b) => b.similarity - a.similarity).map((hit, i) => (
-                          <div key={i} className="p-3 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors">
-                            <div className="flex items-start gap-2">
-                              <FileText className="w-4 h-4 shrink-0 mt-0.5 text-purple-400" />
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs text-zinc-300">{hit.title || hit.source || "Reaction precedent"}</div>
-                                <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500">
-                                  <span>{hit.source}</span>
-                                  {hit.year && <><span>&bull;</span><span>{hit.year}</span></>}
-                                  {hit.doi && <><span>&bull;</span><span>{hit.doi}</span></>}
-                                </div>
-                                <div className="smiles-display text-[10px] text-zinc-600 mt-1 truncate">{hit.rxn_smiles}</div>
+                    {evidence.length > 0 ? (() => {
+                      const localHits = evidence.filter(h => h.similarity > 0).sort((a, b) => b.similarity - a.similarity);
+                      const liveHits = evidence.filter(h => h.similarity === 0);
+                      return (
+                        <>
+                          {/* Local reaction matches */}
+                          {localHits.length > 0 && (
+                            <div>
+                              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+                                Reaction Fingerprint Matches ({localHits.length})
                               </div>
-                              <span className={`text-xs font-medium shrink-0 ${
-                                hit.similarity >= 0.9 ? "text-emerald-400" : hit.similarity >= 0.7 ? "text-amber-400" : "text-zinc-400"
-                              }`}>
-                                {Math.round(hit.similarity * 100)}%
-                              </span>
+                              <div className="space-y-2">
+                                {localHits.map((hit, i) => (
+                                  <div key={`local-${i}`} className="p-3 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors">
+                                    <div className="flex items-start gap-2">
+                                      <FlaskConical className="w-4 h-4 shrink-0 mt-0.5 text-purple-400" />
+                                      <div className="min-w-0 flex-1">
+                                        {hit.doi ? (
+                                          <a href={hit.doi} target="_blank" rel="noopener noreferrer"
+                                            className="text-xs text-purple-400 hover:text-purple-300 underline underline-offset-2">
+                                            {hit.title || hit.source}
+                                          </a>
+                                        ) : (
+                                          <div className="text-xs text-zinc-300">{hit.title || hit.source}</div>
+                                        )}
+                                        <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500">
+                                          <span>{hit.source}</span>
+                                          {hit.year && <><span>&bull;</span><span>{hit.year}</span></>}
+                                        </div>
+                                        {hit.rxn_smiles && (
+                                          <div className="smiles-display text-[10px] text-zinc-600 mt-1 truncate">{hit.rxn_smiles}</div>
+                                        )}
+                                      </div>
+                                      <span className={`text-xs font-medium shrink-0 ${
+                                        hit.similarity >= 0.9 ? "text-emerald-400" : hit.similarity >= 0.7 ? "text-amber-400" : "text-zinc-400"
+                                      }`}>
+                                        {Math.round(hit.similarity * 100)}%
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                      </>
-                    ) : (
+                          )}
+
+                          {/* Live paper/patent hits */}
+                          {liveHits.length > 0 && (
+                            <div>
+                              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+                                Literature &amp; Patents ({liveHits.length})
+                              </div>
+                              <div className="space-y-2">
+                                {liveHits.map((hit, i) => (
+                                  <div key={`live-${i}`} className="p-3 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors">
+                                    <div className="flex items-start gap-2">
+                                      <BookOpen className="w-4 h-4 shrink-0 mt-0.5 text-blue-400" />
+                                      <div className="min-w-0 flex-1">
+                                        {hit.doi ? (
+                                          <a href={hit.doi} target="_blank" rel="noopener noreferrer"
+                                            className="text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2">
+                                            {hit.title || "View paper"}
+                                          </a>
+                                        ) : (
+                                          <div className="text-xs text-zinc-300">{hit.title || "Untitled"}</div>
+                                        )}
+                                        <div className="flex items-center gap-1.5 mt-1 text-[10px] text-zinc-500">
+                                          <span>{hit.source}</span>
+                                          {hit.year && <><span>&bull;</span><span>{hit.year}</span></>}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })() : (
                       <div className="text-center py-8 text-zinc-500 text-sm">
                         No evidence found. The evidence search module returned no matching precedents.
                       </div>

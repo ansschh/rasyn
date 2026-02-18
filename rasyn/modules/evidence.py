@@ -210,13 +210,24 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
 
     evidence = []
     for sim, meta in top_hits:
+        source = meta["source"]
+        # Extract patent number and generate Google Patents URL
+        patent_url = None
+        patent_number = None
+        if "USPTO" in source:
+            import re
+            m = re.search(r'US\d+', source)
+            if m:
+                patent_number = m.group(0)
+                patent_url = f"https://patents.google.com/patent/{patent_number}"
+
         evidence.append({
             "rxn_smiles": meta["reaction_smiles"],
             "similarity": round(sim, 4),
-            "source": meta["source"],
+            "source": source,
             "year": meta.get("year"),
-            "title": None,
-            "doi": None,
+            "title": f"USPTO Patent {patent_number}" if patent_number else None,
+            "doi": patent_url,  # Use doi field for the clickable URL
         })
 
     return evidence
