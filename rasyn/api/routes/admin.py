@@ -14,6 +14,7 @@ from rasyn.api.schemas_v2 import (
     AuditLogResponse,
     GuardrailCheckRequest,
     GuardrailCheckResponse,
+    IntegrationStatusResponse,
     PermissionInfo,
 )
 
@@ -103,3 +104,15 @@ async def list_roles():
             "permissions": perms,
         })
     return {"roles": roles}
+
+
+@router.get("/admin/integrations", response_model=IntegrationStatusResponse)
+async def get_integrations():
+    """Get real integration status based on configured env vars."""
+    try:
+        from rasyn.modules.admin import get_integration_status
+        integrations = get_integration_status()
+        return {"integrations": integrations}
+    except Exception as e:
+        logger.exception(f"Integration status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e)[:200])

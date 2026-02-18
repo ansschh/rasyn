@@ -95,7 +95,10 @@ def _emit(job_id: str, kind: str, message: str = "", data: dict | None = None) -
 
 @app.task(bind=True, name="rasyn.retrosynthesis", max_retries=1)
 def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
-                       models: list | None = None, use_multistep: bool = True):
+                       models: list | None = None, use_multistep: bool = True,
+                       constraints: dict | None = None,
+                       novelty_mode: str = "balanced",
+                       objective: str = "default"):
     """Run retrosynthesis for a given target molecule.
 
     Produces SSE events throughout execution and saves PlanResult to the DB.
@@ -118,7 +121,7 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
             _emit(job_id, kind, message, data)
 
         if use_multistep:
-            _emit(job_id, "info", "Phase 1/4: Multi-step route planning (A* search)...")
+            _emit(job_id, "info", "Phase 1/5: Multi-step route planning (A* search)...")
             from rasyn.modules.planner import run_multistep_planning
             routes = run_multistep_planning(
                 target_smiles=smiles,
@@ -127,12 +130,14 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
                 max_depth=6,
                 max_time=90.0,
                 emit_fn=emit_fn,
+                novelty_mode=novelty_mode,
             )
         else:
             # Fallback: single-step only (as in Slice 2)
-            _emit(job_id, "info", "Phase 1/4: Single-step retrosynthesis...")
+            _emit(job_id, "info", "Phase 1/5: Single-step retrosynthesis...")
             from rasyn.modules.planner import _run_single_step_fallback
-            routes = _run_single_step_fallback(smiles, pipeline, top_k, emit_fn=emit_fn)
+            routes = _run_single_step_fallback(smiles, pipeline, top_k, emit_fn=emit_fn,
+                                                novelty_mode=novelty_mode)
 
         # --- Phase 2: Enrichment ---
         _emit(job_id, "enriching", "Phase 2/5: Safety screening + green chemistry...")
@@ -144,8 +149,9 @@ def run_retrosynthesis(self, job_id: str, smiles: str, top_k: int = 5,
         evidence = _run_evidence(smiles, routes)
 
         # --- Phase 4: Scoring & Ranking (uses evidence for precedent score) ---
-        _emit(job_id, "enriching", "Phase 4/5: Composite scoring and ranking...")
-        routes = _score_and_rank(routes, safety, green_chem, evidence)
+        _emit(job_id, "enriching", "Phase 4/5: Scoring, constraint filtering, and ranking...")
+        routes = _score_and_rank(routes, safety, green_chem, evidence,
+                                 constraints=constraints, objective=objective)
 
         # --- Phase 5: Sourcing + Discovery ---
         _emit(job_id, "enriching", "Phase 5/5: Sourcing lookups + literature search...")
@@ -221,11 +227,14 @@ def _run_evidence(smiles: str, routes: list[dict]) -> list[dict]:
 
 
 def _score_and_rank(routes: list[dict], safety: dict | None, green: dict | None,
-                    evidence: list[dict] | None = None) -> list[dict]:
+                    evidence: list[dict] | None = None,
+                    constraints: dict | None = None,
+                    objective: str = "default") -> list[dict]:
     """Score and re-rank routes using composite scoring."""
     try:
         from rasyn.modules.scoring import score_and_rank_routes
-        return score_and_rank_routes(routes, safety=safety, green=green, evidence=evidence)
+        return score_and_rank_routes(routes, safety=safety, green=green, evidence=evidence,
+                                     constraints=constraints, objective=objective)
     except Exception as e:
         logger.warning(f"Scoring failed: {e}")
         return routes

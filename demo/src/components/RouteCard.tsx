@@ -79,6 +79,16 @@ export default function RouteCard({ route, selected, onSelect }: Props) {
         )}
       </div>
 
+      {/* Constraint violation warning */}
+      {route.constraint_violations && route.constraint_violations.length > 0 && (
+        <div className="flex items-center gap-1.5 mb-2 p-2 rounded-lg bg-red-500/10 border border-red-500/20">
+          <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+          <span className="text-[10px] text-red-400">
+            Violates: {route.constraint_violations.map(v => v.replace(/_/g, " ")).join(", ")}
+          </span>
+        </div>
+      )}
+
       {/* Badges */}
       <div className="flex flex-wrap gap-1.5 mb-3">
         {route.all_purchasable && (

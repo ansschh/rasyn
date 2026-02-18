@@ -48,6 +48,8 @@ async def create_plan(req: PlanRequest, request: Request):
                 "top_k": req.top_k,
                 "models": req.models,
                 "constraints": req.constraints,
+                "novelty_mode": req.novelty_mode.value if req.novelty_mode else "balanced",
+                "objective": req.objective.value if req.objective else "default",
             },
         )
         session.add(job)
@@ -59,6 +61,9 @@ async def create_plan(req: PlanRequest, request: Request):
         smiles=canon,
         top_k=req.top_k,
         models=req.models,
+        constraints=req.constraints,
+        novelty_mode=req.novelty_mode.value if req.novelty_mode else "balanced",
+        objective=req.objective.value if req.objective else "default",
     )
 
     logger.info(f"Job {job_id} created for {canon[:50]}...")

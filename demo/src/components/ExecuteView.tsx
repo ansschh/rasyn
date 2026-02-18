@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Play, FileText, FlaskConical, Check, CheckCircle2,
-  Download, Beaker, Tag, ExternalLink, ListChecks, Loader2, AlertCircle
+  Download, Beaker, Tag, ExternalLink, ListChecks, Loader2, AlertCircle, Upload, ChevronDown
 } from "lucide-react";
 import type { ExperimentResult } from "../lib/api";
 
@@ -13,6 +13,13 @@ interface Props {
   liveExperiment?: ExperimentResult | null;
 }
 
+const EXPORT_FORMATS = [
+  { id: "pdf" as const, label: "PDF", ext: ".pdf", mime: "application/pdf" },
+  { id: "json" as const, label: "JSON", ext: ".json", mime: "application/json" },
+  { id: "csv" as const, label: "CSV", ext: ".csv", mime: "text/csv" },
+  { id: "sdf" as const, label: "SDF", ext: ".sdf", mime: "chemical/x-mdl-sdfile" },
+];
+
 export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
   const [hasGenerated, setHasGenerated] = useState(!!liveExperiment);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -21,6 +28,23 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<"protocol" | "reagents" | "samples" | "workup">("protocol");
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [elnAvailable, setElnAvailable] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<string | null>(null);
+
+  // Check if ELN webhook is configured
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getIntegrationStatus } = await import("../lib/api");
+        const status = await getIntegrationStatus();
+        const eln = status.integrations.find(i => i.name === "ELN Webhook");
+        setElnAvailable(eln?.status === "connected");
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -54,23 +78,43 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
     }
   };
 
-  const handleExportPdf = async () => {
-    if (!route) {
-      setError("No route available for PDF export");
+  const handleExport = async (format: "pdf" | "json" | "csv" | "sdf") => {
+    if (!liveData) {
+      setError("Generate a protocol first");
       return;
     }
+    setExportingFormat(format);
+    setShowExportMenu(false);
     try {
-      const { exportProtocolPdf } = await import("../lib/api");
-      const blob = await exportProtocolPdf(route as any, 0, "0.5 mmol");
+      const { exportExperiment } = await import("../lib/api");
+      const blob = await exportExperiment(liveData, format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${liveData?.id || "protocol"}_protocol.pdf`;
+      const ext = EXPORT_FORMATS.find(f => f.id === format)?.ext || ".dat";
+      a.download = `${liveData.id}${ext}`;
       a.click();
       URL.revokeObjectURL(url);
-      showToast("PDF downloaded");
+      showToast(`${format.toUpperCase()} downloaded`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "PDF export failed");
+      setError(e instanceof Error ? e.message : `${format.toUpperCase()} export failed`);
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
+  const handlePushToEln = async () => {
+    if (!liveData) return;
+    try {
+      const { exportToWebhook } = await import("../lib/api");
+      const result = await exportToWebhook(liveData);
+      if (result.status === "success") {
+        showToast("Pushed to ELN successfully");
+      } else {
+        setError(result.message || "ELN push failed");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "ELN push failed");
     }
   };
 
@@ -103,9 +147,46 @@ export default function ExecuteView({ jobId, route, liveExperiment }: Props) {
           )}
           {hasGenerated && exp && (
             <div className="flex items-center gap-2">
-              <button onClick={handleExportPdf} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs transition-colors">
-                <Download className="w-3.5 h-3.5" /> Download PDF
-              </button>
+              {/* Multi-format export dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowExportMenu(!showExportMenu)}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs transition-colors"
+                >
+                  {exportingFormat ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                  Export
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                {showExportMenu && (
+                  <div className="absolute right-0 top-full mt-1 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl z-50 py-1 min-w-[120px]">
+                    {EXPORT_FORMATS.map(fmt => (
+                      <button
+                        key={fmt.id}
+                        onClick={() => handleExport(fmt.id)}
+                        className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                      >
+                        {fmt.label} ({fmt.ext})
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {/* ELN push button */}
+              {elnAvailable && (
+                <button
+                  onClick={handlePushToEln}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5" /> Push to ELN
+                </button>
+              )}
+              {!elnAvailable && (
+                <span className="text-[10px] text-zinc-500">No ELN configured</span>
+              )}
             </div>
           )}
         </div>

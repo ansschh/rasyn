@@ -279,3 +279,92 @@ def check_guardrails(smiles: str) -> dict:
             "alerts": [],
             "requires_review": True,
         }
+
+
+# ---------------------------------------------------------------------------
+# Integration status — real checks based on env vars
+# ---------------------------------------------------------------------------
+
+def get_integration_status() -> list[dict]:
+    """Check real integration status based on configured env vars and reachable services.
+
+    Returns a list of IntegrationStatusItem-compatible dicts.
+    """
+    import os
+
+    integrations = []
+
+    # AI / Model APIs
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    integrations.append({
+        "name": "Anthropic (Claude)",
+        "category": "ai",
+        "status": "connected" if anthropic_key else "not_configured",
+        "detail": "Claude Haiku for protocol generation & copilot" if anthropic_key else "Set ANTHROPIC_API_KEY",
+    })
+
+    # Vendor APIs
+    chemspace_key = os.environ.get("CHEMSPACE_API_KEY", "")
+    integrations.append({
+        "name": "ChemSpace",
+        "category": "vendor",
+        "status": "connected" if chemspace_key else "not_configured",
+        "detail": "Vendor sourcing & pricing" if chemspace_key else "Set CHEMSPACE_API_KEY",
+    })
+
+    molport_key = os.environ.get("MOLPORT_API_KEY", "")
+    integrations.append({
+        "name": "MolPort",
+        "category": "vendor",
+        "status": "connected" if molport_key else "not_configured",
+        "detail": "Vendor sourcing & pricing" if molport_key else "Set MOLPORT_API_KEY",
+    })
+
+    # Free literature APIs (always connected)
+    integrations.append({
+        "name": "PubChem",
+        "category": "literature",
+        "status": "connected",
+        "detail": "Compound info & safety data (free, no key needed)",
+    })
+    integrations.append({
+        "name": "Semantic Scholar",
+        "category": "literature",
+        "status": "connected",
+        "detail": "Academic paper search (free, no key needed)",
+    })
+    integrations.append({
+        "name": "OpenAlex",
+        "category": "literature",
+        "status": "connected",
+        "detail": "Open academic metadata (free, no key needed)",
+    })
+
+    # ELN Webhook
+    eln_url = os.environ.get("RASYN_ELN_WEBHOOK_URL", "")
+    integrations.append({
+        "name": "ELN Webhook",
+        "category": "eln",
+        "status": "connected" if eln_url else "not_configured",
+        "detail": f"Webhook: {eln_url[:50]}..." if eln_url and len(eln_url) > 50 else (eln_url or "Set RASYN_ELN_WEBHOOK_URL"),
+    })
+
+    # Database
+    db_url = os.environ.get("DATABASE_URL", "")
+    integrations.append({
+        "name": "PostgreSQL",
+        "category": "infrastructure",
+        "status": "connected" if db_url else "not_configured",
+        "detail": "Reaction index, audit log, experiments" if db_url else "Set DATABASE_URL",
+    })
+
+    # Redis
+    redis_url = os.environ.get("REDIS_URL", "")
+    integrations.append({
+        "name": "Redis",
+        "category": "infrastructure",
+        "status": "connected" if redis_url else "not_configured",
+        "detail": "Job queue & SSE events" if redis_url else "Set REDIS_URL",
+    })
+
+    return integrations

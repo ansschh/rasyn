@@ -25,6 +25,20 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class NoveltyMode(str, Enum):
+    conservative = "conservative"
+    balanced = "balanced"
+    exploratory = "exploratory"
+
+
+class Objective(str, Enum):
+    default = "default"
+    fastest = "fastest"
+    cheapest = "cheapest"
+    safest = "safest"
+    greenest = "greenest"
+
+
 # ---------------------------------------------------------------------------
 # Request
 # ---------------------------------------------------------------------------
@@ -37,7 +51,13 @@ class PlanRequest(BaseModel):
         description="Models to use: 'retro_v2', 'llm', or both",
     )
     constraints: dict | None = Field(
-        None, description="Optional constraints (no_pd, max_steps, etc.)"
+        None, description="Optional constraints (no_pd, no_azide, min_pg, stock_prefer, no_cryo)"
+    )
+    novelty_mode: NoveltyMode = Field(
+        NoveltyMode.balanced, description="Model selection strategy"
+    )
+    objective: Objective = Field(
+        Objective.default, description="Optimization objective for route ranking"
     )
 
 
@@ -420,3 +440,27 @@ class GuardrailCheckResponse(BaseModel):
 class PermissionInfo(BaseModel):
     role: str = ""
     permissions: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Integration Status
+# ---------------------------------------------------------------------------
+
+class IntegrationStatusItem(BaseModel):
+    name: str = ""
+    category: str = ""  # "vendor", "literature", "eln", "ai"
+    status: str = "not_configured"  # "connected", "not_configured"
+    detail: str = ""
+
+
+class IntegrationStatusResponse(BaseModel):
+    integrations: list[IntegrationStatusItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Multi-format Export
+# ---------------------------------------------------------------------------
+
+class ExportRequest(BaseModel):
+    experiment: dict = Field(..., description="Experiment dict from protocol generation")
+    format: str = Field("json", description="Export format: json, csv, sdf, pdf")

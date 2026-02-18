@@ -15,6 +15,86 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Constraint checking (RDKit substructure matching)
+# ---------------------------------------------------------------------------
+
+CONSTRAINT_SMARTS = {
+    "no_pd": ("[#46]", "Contains palladium"),
+    "no_azide": ("[N-]=[N+]=[N-]", "Contains azide group"),
+}
+
+# Protecting group SMARTS for min_pg constraint
+PG_SMARTS = [
+    "OC(=O)OC(C)(C)C",          # Boc
+    "OC(=O)OCC1c2ccccc2-c2ccccc21",  # Fmoc
+    "OC(=O)OCc1ccccc1",          # Cbz
+    "[Si](C)(C)C(C)(C)C",       # TBDMS
+]
+
+
+def _check_constraint_violations(route: dict, constraints: dict) -> list[str]:
+    """Check a route against user-specified constraints.
+
+    Returns a list of violated constraint names.
+    """
+    if not constraints:
+        return []
+
+    violations = []
+
+    try:
+        from rdkit import Chem
+    except ImportError:
+        return []
+
+    # Collect all SMILES in the route
+    all_smiles = set()
+    for step in route.get("steps", []):
+        all_smiles.add(step.get("product", ""))
+        all_smiles.update(step.get("reactants", []))
+    all_smiles.update(route.get("starting_materials", []))
+    all_smiles.discard("")
+
+    # Parse all molecules once
+    mols = []
+    for smi in all_smiles:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is not None:
+            mols.append(mol)
+
+    # Check SMARTS-based constraints
+    for constraint_name, (smarts_str, _desc) in CONSTRAINT_SMARTS.items():
+        if not constraints.get(constraint_name):
+            continue
+        pattern = Chem.MolFromSmarts(smarts_str)
+        if pattern is None:
+            continue
+        for mol in mols:
+            if mol.HasSubstructMatch(pattern):
+                violations.append(constraint_name)
+                break
+
+    # min_pg: check if route uses protecting groups (flag if <2 PG steps found)
+    if constraints.get("min_pg"):
+        pg_count = 0
+        for pg_smarts in PG_SMARTS:
+            pattern = Chem.MolFromSmarts(pg_smarts)
+            if pattern is None:
+                continue
+            for mol in mols:
+                if mol.HasSubstructMatch(pattern):
+                    pg_count += 1
+                    break
+        if pg_count < 2:
+            violations.append("min_pg")
+
+    # stock_prefer: not a hard constraint, handled in ranking
+    # no_cryo: advisory only, passed to copilot context
+
+    return violations
+
+
 def compute_route_metrics(
     route: dict,
     safety: dict | None = None,
@@ -102,16 +182,49 @@ def compute_route_metrics(
     return {"metrics": metrics, "rank_key": rank_key}
 
 
+def _objective_sort_key(route: dict, objective: str):
+    """Return a sort key tuple for objective-based ranking.
+
+    Higher values are better (sorted descending).
+    """
+    metrics = route.get("metrics", route.get("score_breakdown", {}))
+    confidence = metrics.get("model_confidence") or route.get("overall_score", 0)
+    num_steps = metrics.get("num_steps", route.get("num_steps", 99))
+    alert_count = metrics.get("safety_alert_count", 0)
+    atom_economy = metrics.get("atom_economy_pct") or 0
+    all_purchasable = 1 if route.get("all_purchasable") else 0
+    sm_total = metrics.get("starting_materials_total", route.get("num_steps", 99))
+    violated = 1 if route.get("constraint_violations") else 0
+
+    if objective == "fastest":
+        # Fewer steps better, then confidence
+        return (-violated, -num_steps, confidence)
+    elif objective == "cheapest":
+        # All purchasable first, then fewer starting materials, then confidence
+        return (-violated, all_purchasable, -sm_total, confidence)
+    elif objective == "safest":
+        # Fewer safety alerts, then confidence
+        return (-violated, -alert_count, confidence)
+    elif objective == "greenest":
+        # Higher atom economy, then confidence
+        return (-violated, atom_economy, confidence)
+    else:  # "default"
+        # Model confidence descending (violated routes pushed to bottom)
+        return (-violated, confidence)
+
+
 def score_and_rank_routes(
     routes: list[dict],
     safety: dict | None = None,
     green: dict | None = None,
     evidence: list[dict] | None = None,
+    constraints: dict | None = None,
+    objective: str = "default",
 ) -> list[dict]:
-    """Compute metrics and rank routes by model confidence.
+    """Compute metrics, check constraints, and rank routes.
 
-    Updates routes in-place with raw metrics. Ranks by the only real
-    predictive signal: average model confidence across steps.
+    Updates routes in-place with raw metrics and constraint violations.
+    Violating routes are pushed to bottom but kept visible (flagged).
     """
     for route in routes:
         result = compute_route_metrics(route, safety=safety, green=green, evidence=evidence)
@@ -121,8 +234,13 @@ def score_and_rank_routes(
         # Map to score_breakdown for backward compat (frontend reads this)
         route["score_breakdown"] = result["metrics"]
 
-    # Rank by model confidence (descending)
-    routes.sort(key=lambda r: r.get("overall_score", 0), reverse=True)
+        # Check constraint violations
+        violations = _check_constraint_violations(route, constraints)
+        if violations:
+            route["constraint_violations"] = violations
+
+    # Rank by objective (violated routes always at bottom)
+    routes.sort(key=lambda r: _objective_sort_key(r, objective), reverse=True)
     for i, route in enumerate(routes):
         route["rank"] = i + 1
 

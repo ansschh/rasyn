@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from rasyn.api.schemas_v2 import ProtocolRequest, ExperimentResult
+from rasyn.api.schemas_v2 import ProtocolRequest, ExperimentResult, ExportRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["execute"])
@@ -120,6 +120,67 @@ async def generate_from_job(job_id: str, step_index: int = 0, scale: str = "0.5 
     except Exception as e:
         logger.exception(f"Protocol from job failed: {e}")
         raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@router.post("/execute/export")
+async def export_experiment(req: ExportRequest):
+    """Export experiment in multiple formats (json, csv, sdf, pdf)."""
+    try:
+        from rasyn.modules.execute import (
+            export_experiment_json,
+            export_experiment_csv,
+            export_experiment_sdf,
+            export_protocol_pdf,
+        )
+
+        exp = req.experiment
+        exp_id = exp.get("id", "experiment")
+        fmt = req.format.lower()
+
+        if fmt == "json":
+            content = export_experiment_json(exp)
+            return Response(content=content, media_type="application/json",
+                            headers={"Content-Disposition": f'attachment; filename="{exp_id}.json"'})
+        elif fmt == "csv":
+            content = export_experiment_csv(exp)
+            return Response(content=content, media_type="text/csv",
+                            headers={"Content-Disposition": f'attachment; filename="{exp_id}.csv"'})
+        elif fmt == "sdf":
+            content = export_experiment_sdf(exp)
+            if not content:
+                raise HTTPException(status_code=500, detail="SDF export failed (RDKit not available)")
+            return Response(content=content, media_type="chemical/x-mdl-sdfile",
+                            headers={"Content-Disposition": f'attachment; filename="{exp_id}.sdf"'})
+        elif fmt == "pdf":
+            content = export_protocol_pdf(exp)
+            return Response(content=content, media_type="application/pdf",
+                            headers={"Content-Disposition": f'attachment; filename="{exp_id}_protocol.pdf"'})
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}. Use json, csv, sdf, or pdf.")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Export failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)[:200]}")
+
+
+@router.post("/execute/export-webhook")
+async def export_to_webhook(req: ExportRequest):
+    """Push experiment to ELN via webhook."""
+    try:
+        from rasyn.modules.execute import export_webhook
+
+        result = export_webhook(req.experiment)
+        if result["status"] == "error" and "No ELN webhook" in result.get("message", ""):
+            raise HTTPException(status_code=400, detail=result["message"])
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Webhook export failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Webhook export failed: {str(e)[:200]}")
 
 
 def _save_experiment(exp_data: dict) -> None:

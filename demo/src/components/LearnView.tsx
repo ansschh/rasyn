@@ -12,6 +12,7 @@ import type {
 interface Props {
   jobId?: string | null;
   targetSmiles?: string | null;
+  selectedRouteIdx?: number;
 }
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
@@ -46,7 +47,7 @@ function InsightTypeBadge({ type }: { type: string }) {
   );
 }
 
-export default function LearnView({ jobId, targetSmiles }: Props) {
+export default function LearnView({ jobId, targetSmiles, selectedRouteIdx = 0 }: Props) {
   const [activeSection, setActiveSection] = useState<"ranking" | "memory" | "experiments">("ranking");
   const [expandedExp, setExpandedExp] = useState<string | null>(null);
 
@@ -75,7 +76,7 @@ export default function LearnView({ jobId, targetSmiles }: Props) {
         setLiveStats(statsRes);
 
         if (jobId) {
-          const rankingRes = await getRankingExplanation(jobId, 0).catch(() => null);
+          const rankingRes = await getRankingExplanation(jobId, selectedRouteIdx).catch(() => null);
           if (!cancelled && rankingRes) {
             setLiveRanking(rankingRes);
           }

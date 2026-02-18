@@ -8,7 +8,7 @@ import {
   Search, TestTubes, Brain, BarChart3, Shield, Package, AlertCircle,
   Loader2, Send
 } from "lucide-react";
-import type { AppState, NoveltyMode, ProjectTab, Constraint } from "../types";
+import type { AppState, NoveltyMode, Objective, ProjectTab, Constraint } from "../types";
 import RouteCard from "../components/RouteCard";
 import StepDetail from "../components/StepDetail";
 import SourceView from "../components/SourceView";
@@ -54,6 +54,7 @@ export default function Home() {
   const [targetName, setTargetName] = useState("");
   const [constraints, setConstraints] = useState<Constraint[]>(DEFAULT_CONSTRAINTS);
   const [noveltyMode, setNoveltyMode] = useState<NoveltyMode>("balanced");
+  const [objective, setObjective] = useState<Objective>("default");
   const [selectedRouteIdx, setSelectedRouteIdx] = useState<number | null>(null);
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const [rightTab, setRightTab] = useState<"log" | "evidence" | "copilot">("log");
@@ -117,17 +118,37 @@ export default function Home() {
     setCopilotMessages([]);
 
     try {
+      // Build constraints dict from active UI toggles
+      const activeConstraints: Record<string, boolean> = {};
+      for (const c of constraints) {
+        if (c.active) {
+          // Map UI constraint IDs to backend keys
+          const keyMap: Record<string, string> = {
+            "no-pd": "no_pd",
+            "no-cryo": "no_cryo",
+            "no-azide": "no_azide",
+            "stock-prefer": "stock_prefer",
+            "min-pg": "min_pg",
+          };
+          const backendKey = keyMap[c.id] || c.id;
+          activeConstraints[backendKey] = true;
+        }
+      }
+
       const resp = await startPlan({
         smiles: targetSmiles.trim(),
         top_k: 5,
-        models: ["retro_v2", "llm"],
+        models: noveltyMode === "conservative" ? ["retro_v2"] : ["retro_v2", "llm"],
+        constraints: Object.keys(activeConstraints).length > 0 ? activeConstraints : null,
+        novelty_mode: noveltyMode,
+        objective: objective,
       });
       setJobId(resp.job_id);
     } catch (err) {
       setApiError(err instanceof Error ? err.message : "Failed to start planning job");
       setAppState("idle");
     }
-  }, [targetSmiles]);
+  }, [targetSmiles, constraints, noveltyMode, objective]);
 
   const handleReplan = useCallback(() => {
     handlePlan();
@@ -407,16 +428,19 @@ export default function Home() {
         {appState === "results" && activeTab === "execute" && (
           <ExecuteView
             jobId={jobId}
-            route={liveResult?.routes?.[0] ? liveResult.routes[0] as any : null}
+            route={selectedRoute as any}
           />
         )}
 
         {appState === "results" && activeTab === "analyze" && (
-          <AnalyzeView productSmiles={targetSmiles} />
+          <AnalyzeView
+            productSmiles={targetSmiles}
+            expectedMw={liveResult?.safety?.druglikeness?.mw}
+          />
         )}
 
         {appState === "results" && activeTab === "learn" && (
-          <LearnView jobId={jobId} targetSmiles={targetSmiles} />
+          <LearnView jobId={jobId} targetSmiles={targetSmiles} selectedRouteIdx={selectedRouteIdx ?? 0} />
         )}
 
         {appState === "results" && activeTab === "admin" && (
@@ -510,9 +534,17 @@ export default function Home() {
                     <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Objective</span>
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
-                    {["Fastest", "Cheapest", "Safest", "Greenest"].map(obj => (
-                      <button key={obj} className="px-3 py-2 text-xs rounded-lg border border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300 transition-colors">
-                        {obj}
+                    {(["default", "fastest", "cheapest", "safest", "greenest"] as Objective[]).map(obj => (
+                      <button
+                        key={obj}
+                        onClick={() => setObjective(obj)}
+                        className={`px-3 py-2 text-xs rounded-lg border transition-colors ${
+                          objective === obj
+                            ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
+                            : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
+                        }`}
+                      >
+                        {obj === "default" ? "Default" : obj.charAt(0).toUpperCase() + obj.slice(1)}
                       </button>
                     ))}
                   </div>

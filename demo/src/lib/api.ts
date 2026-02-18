@@ -16,6 +16,8 @@ export interface PlanRequest {
   top_k?: number;
   models?: string[];
   constraints?: Record<string, unknown> | null;
+  novelty_mode?: "conservative" | "balanced" | "exploratory";
+  objective?: "default" | "fastest" | "cheapest" | "safest" | "greenest";
 }
 
 export interface PlanResult {
@@ -65,6 +67,7 @@ export interface ApiRoute {
   num_steps: number;
   starting_materials: string[];
   all_purchasable: boolean;
+  constraint_violations?: string[];
 }
 
 export interface ApiStep {
@@ -608,6 +611,63 @@ export async function getRoles(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/api/v2/admin/roles`);
   if (!res.ok) throw new Error(`Roles error: ${res.status}`);
+  return res.json();
+}
+
+
+// ---------------------------------------------------------------------------
+// Integration Status
+// ---------------------------------------------------------------------------
+
+export interface IntegrationStatusItem {
+  name: string;
+  category: string;
+  status: "connected" | "not_configured";
+  detail: string;
+}
+
+/**
+ * Get real integration status from backend.
+ */
+export async function getIntegrationStatus(): Promise<{ integrations: IntegrationStatusItem[] }> {
+  const res = await fetch(`${API_BASE}/api/v2/admin/integrations`);
+  if (!res.ok) throw new Error(`Integration status error: ${res.status}`);
+  return res.json();
+}
+
+
+// ---------------------------------------------------------------------------
+// Multi-format Export
+// ---------------------------------------------------------------------------
+
+/**
+ * Export experiment in various formats (json, csv, sdf, pdf).
+ */
+export async function exportExperiment(
+  experiment: ExperimentResult,
+  format: "json" | "csv" | "sdf" | "pdf",
+): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/api/v2/execute/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ experiment, format }),
+  });
+  if (!res.ok) throw new Error(`Export error: ${res.status}`);
+  return res.blob();
+}
+
+/**
+ * Push experiment to ELN via webhook.
+ */
+export async function exportToWebhook(
+  experiment: ExperimentResult,
+): Promise<{ status: string; message: string }> {
+  const res = await fetch(`${API_BASE}/api/v2/execute/export-webhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ experiment, format: "json" }),
+  });
+  if (!res.ok) throw new Error(`Webhook export error: ${res.status}`);
   return res.json();
 }
 

@@ -17,4 +17,5 @@ export interface ActionLogEntry {
 
 export type AppState = "idle" | "planning" | "results";
 export type NoveltyMode = "conservative" | "balanced" | "exploratory";
+export type Objective = "default" | "fastest" | "cheapest" | "safest" | "greenest";
 export type ProjectTab = "discover" | "plan" | "source" | "execute" | "analyze" | "learn" | "admin";

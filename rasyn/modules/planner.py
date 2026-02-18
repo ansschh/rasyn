@@ -71,6 +71,7 @@ def run_multistep_planning(
     max_depth: int = 6,
     max_time: float = 120.0,
     emit_fn: Callable | None = None,
+    novelty_mode: str = "balanced",
 ) -> list[dict]:
     """Run multi-step retrosynthesis using A* search with our models.
 
@@ -85,6 +86,10 @@ def run_multistep_planning(
         max_depth: Max synthesis steps.
         max_time: Time limit in seconds.
         emit_fn: Optional callback for SSE events: emit_fn(kind, message, data).
+        novelty_mode: Model selection strategy —
+            'conservative': RetroTx v2 only (proven reactions),
+            'balanced': Both models (default),
+            'exploratory': Both models + wider beam width.
 
     Returns:
         List of route dicts compatible with PlanResult.routes schema.
@@ -92,20 +97,29 @@ def run_multistep_planning(
     emit = emit_fn or (lambda *a, **kw: None)
     t0 = time.perf_counter()
 
-    emit("planning_started", f"Starting multi-step planning for {target_smiles[:60]}...")
+    mode_labels = {
+        "conservative": "conservative (RetroTx only)",
+        "balanced": "balanced (dual-model)",
+        "exploratory": "exploratory (wide beam)",
+    }
+    emit("planning_started",
+         f"Starting {mode_labels.get(novelty_mode, novelty_mode)} planning for {target_smiles[:60]}...")
 
     # Build enhanced inventory
     inventory = get_enhanced_inventory()
     emit("info", f"Loaded {len(inventory)} building blocks for stock termination")
 
+    # Adjust beam width based on novelty mode
+    beam_width = {"conservative": 15, "balanced": 15, "exploratory": 25}.get(novelty_mode, 15)
+
     # Try multi-step A* search first
     routes = []
     try:
-        emit("model_running", "Running A* tree search with dual-model expansion...")
+        emit("model_running", "Running A* tree search...")
         routes = _run_astar(
             target_smiles, pipeline_service, inventory,
             top_k=top_k, max_depth=max_depth, max_time=max_time,
-            emit_fn=emit,
+            emit_fn=emit, novelty_mode=novelty_mode, beam_width=beam_width,
         )
     except Exception as e:
         logger.warning(f"Multi-step search failed: {e}")
@@ -116,6 +130,7 @@ def run_multistep_planning(
         emit("info", "No multi-step routes found — falling back to single-step predictions")
         routes = _run_single_step_fallback(
             target_smiles, pipeline_service, top_k, emit_fn=emit,
+            novelty_mode=novelty_mode,
         )
 
     elapsed = time.perf_counter() - t0
@@ -132,30 +147,39 @@ def _run_astar(
     max_depth: int,
     max_time: float,
     emit_fn: Callable | None = None,
+    novelty_mode: str = "balanced",
+    beam_width: int = 15,
 ) -> list[dict]:
-    """Run A* search with combined model expansion."""
+    """Run A* search with model expansion based on novelty mode."""
     from rasyn.planner.astar import AStarPlanner
 
     emit = emit_fn or (lambda *a, **kw: None)
     nodes_expanded = [0]
 
+    use_retro = True  # Always use RetroTx
+    use_llm = novelty_mode != "conservative"  # Skip LLM in conservative mode
+    retro_top_k = 5 if novelty_mode != "exploratory" else 8
+    llm_top_k = 3 if novelty_mode != "exploratory" else 5
+
     def combined_expansion(smiles: str):
-        """Use both RetroTx v2 and LLM for single-step predictions."""
+        """Use models for single-step predictions based on novelty mode."""
         results = []
 
         # RetroTx v2 (primary, 69.7% top-1)
-        try:
-            retro_preds = pipeline_service._run_retro_pipeline(smiles, top_k=5)
-            results.extend(retro_preds)
-        except Exception as e:
-            logger.debug(f"RetroTx v2 expansion failed for {smiles}: {e}")
+        if use_retro:
+            try:
+                retro_preds = pipeline_service._run_retro_pipeline(smiles, top_k=retro_top_k)
+                results.extend(retro_preds)
+            except Exception as e:
+                logger.debug(f"RetroTx v2 expansion failed for {smiles}: {e}")
 
         # LLM (secondary, 61.7% top-1, complementary)
-        try:
-            llm_preds = pipeline_service._run_llm_pipeline(smiles, top_k=3, use_verification=False)
-            results.extend(llm_preds)
-        except Exception as e:
-            logger.debug(f"LLM expansion failed for {smiles}: {e}")
+        if use_llm:
+            try:
+                llm_preds = pipeline_service._run_llm_pipeline(smiles, top_k=llm_top_k, use_verification=False)
+                results.extend(llm_preds)
+            except Exception as e:
+                logger.debug(f"LLM expansion failed for {smiles}: {e}")
 
         nodes_expanded[0] += 1
         if nodes_expanded[0] % 5 == 0:
@@ -170,7 +194,7 @@ def _run_astar(
         max_depth=max_depth,
         max_nodes=min(top_k * 500, 3000),
         max_time_seconds=max_time,
-        beam_width=15,
+        beam_width=beam_width,
     )
 
     raw_routes = planner.plan(target_smiles, max_routes=top_k)
@@ -241,21 +265,25 @@ def _run_single_step_fallback(
     pipeline_service,
     top_k: int,
     emit_fn: Callable | None = None,
+    novelty_mode: str = "balanced",
 ) -> list[dict]:
-    """Fallback: run single-step predictions from both models."""
+    """Fallback: run single-step predictions from models based on novelty mode."""
     emit = emit_fn or (lambda *a, **kw: None)
     all_predictions = []
 
-    # LLM
-    try:
-        emit("model_running", "Running RSGPT-3.2B (LLM) model...")
-        llm_results = pipeline_service._run_llm_pipeline(target_smiles, top_k, use_verification=True)
-        all_predictions.extend(llm_results)
-        emit("step_complete", f"LLM produced {len(llm_results)} predictions",
-             {"model": "llm", "count": len(llm_results)})
-    except Exception as e:
-        logger.warning(f"LLM pipeline failed: {e}")
-        emit("warning", f"LLM model failed: {str(e)[:100]}")
+    use_llm = novelty_mode != "conservative"
+
+    # LLM (skip in conservative mode)
+    if use_llm:
+        try:
+            emit("model_running", "Running RSGPT-3.2B (LLM) model...")
+            llm_results = pipeline_service._run_llm_pipeline(target_smiles, top_k, use_verification=True)
+            all_predictions.extend(llm_results)
+            emit("step_complete", f"LLM produced {len(llm_results)} predictions",
+                 {"model": "llm", "count": len(llm_results)})
+        except Exception as e:
+            logger.warning(f"LLM pipeline failed: {e}")
+            emit("warning", f"LLM model failed: {str(e)[:100]}")
 
     # RetroTx v2
     try:

@@ -529,3 +529,150 @@ def export_protocol_pdf(experiment: dict) -> bytes:
 
         text = "\n".join(lines)
         return text.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Multi-format export (JSON, CSV, SDF, webhook)
+# ---------------------------------------------------------------------------
+
+def export_experiment_json(experiment: dict) -> bytes:
+    """Export experiment as pretty-printed JSON."""
+    return json.dumps(experiment, indent=2, default=str).encode("utf-8")
+
+
+def export_experiment_csv(experiment: dict) -> bytes:
+    """Export experiment reagent table + protocol as CSV."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    # Header info
+    writer.writerow(["Experiment ID", experiment.get("id", "")])
+    writer.writerow(["Reaction", experiment.get("reactionName", "")])
+    writer.writerow(["Scale", experiment.get("scale", "")])
+    writer.writerow(["Product SMILES", experiment.get("product_smiles", "")])
+    writer.writerow([])
+
+    # Reagent table
+    writer.writerow(["Reagent", "Role", "Equivalents", "Amount", "MW (g/mol)"])
+    for r in experiment.get("reagents", []):
+        writer.writerow([
+            r.get("name", ""),
+            r.get("role", ""),
+            r.get("equivalents", ""),
+            r.get("amount", ""),
+            r.get("mw", ""),
+        ])
+    writer.writerow([])
+
+    # Protocol steps
+    writer.writerow(["Protocol Steps"])
+    for i, step in enumerate(experiment.get("protocol", []), 1):
+        writer.writerow([f"{i}. {step}"])
+    writer.writerow([])
+
+    # Workup
+    writer.writerow(["Workup Checklist"])
+    for item in experiment.get("workupChecklist", []):
+        writer.writerow([item])
+    writer.writerow([])
+
+    # Samples
+    writer.writerow(["Sample ID", "Label", "Type", "Planned Analysis", "Status"])
+    for s in experiment.get("samples", []):
+        writer.writerow([
+            s.get("id", ""),
+            s.get("label", ""),
+            s.get("type", ""),
+            ", ".join(s.get("plannedAnalysis", [])),
+            s.get("status", ""),
+        ])
+
+    return buf.getvalue().encode("utf-8")
+
+
+def export_experiment_sdf(experiment: dict) -> bytes:
+    """Export product + reactant structures as SDF file."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        writer = Chem.SDWriter("/dev/null")  # dummy to get the class
+        writer.close()
+
+        import io
+        sdf_buf = io.StringIO()
+
+        all_smiles = []
+        product = experiment.get("product_smiles", "")
+        if product:
+            all_smiles.append(("Product", product))
+        for smi in experiment.get("reactant_smiles", []):
+            all_smiles.append(("Reactant", smi))
+
+        for role, smi in all_smiles:
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                continue
+            mol = Chem.AddHs(mol)
+            try:
+                AllChem.EmbedMolecule(mol, randomSeed=42)
+                AllChem.MMFFOptimizeMolecule(mol, maxIters=200)
+            except Exception:
+                pass
+            mol = Chem.RemoveHs(mol)
+            mol.SetProp("_Name", f"{role}: {smi}")
+            mol.SetProp("Role", role)
+            mol.SetProp("SMILES", smi)
+            mol.SetProp("Experiment_ID", experiment.get("id", ""))
+            sdf_buf.write(Chem.MolToMolBlock(mol))
+            sdf_buf.write("\n$$$$\n")
+
+        return sdf_buf.getvalue().encode("utf-8")
+
+    except ImportError:
+        logger.warning("RDKit not available for SDF export")
+        return b""
+    except Exception as e:
+        logger.warning(f"SDF export failed: {e}")
+        return b""
+
+
+def export_webhook(experiment: dict, webhook_url: str | None = None) -> dict:
+    """Push experiment to ELN webhook endpoint.
+
+    Returns dict with status and response info.
+    """
+    import os
+    import urllib.request
+    import urllib.error
+
+    url = webhook_url or os.environ.get("RASYN_ELN_WEBHOOK_URL")
+    if not url:
+        return {"status": "error", "message": "No ELN webhook URL configured"}
+
+    payload = json.dumps({
+        "source": "rasyn",
+        "version": "2.0",
+        "experiment": experiment,
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return {
+                "status": "success",
+                "http_status": resp.status,
+                "message": f"Pushed to ELN ({resp.status})",
+            }
+    except urllib.error.HTTPError as e:
+        return {"status": "error", "http_status": e.code, "message": f"ELN webhook error: {e.code}"}
+    except Exception as e:
+        return {"status": "error", "message": f"ELN webhook failed: {str(e)[:200]}"}

@@ -3,38 +3,48 @@
 import { useState, useEffect } from "react";
 import {
   Shield, Users, Activity, Lock,
-  Server, Globe, Eye, AlertTriangle, Loader2, AlertCircle
+  Server, Globe, Eye, AlertTriangle, Loader2, AlertCircle,
+  CheckCircle2, XCircle, Plug
 } from "lucide-react";
 import type { AuditLogResponse } from "../lib/api";
+import type { IntegrationStatusItem } from "../lib/api";
 
 export default function AdminPanel() {
-  const [activeSection, setActiveSection] = useState<"audit" | "security">("audit");
+  const [activeSection, setActiveSection] = useState<"audit" | "integrations" | "security">("audit");
   const [liveAuditLog, setLiveAuditLog] = useState<AuditLogResponse | null>(null);
+  const [integrations, setIntegrations] = useState<IntegrationStatusItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    async function fetchAuditLog() {
+    async function fetchData() {
       setIsLoading(true);
       setError(null);
       try {
-        const { getAuditLog } = await import("../lib/api");
-        const result = await getAuditLog(100);
+        const { getAuditLog, getIntegrationStatus } = await import("../lib/api");
+        const [auditResult, integResult] = await Promise.all([
+          getAuditLog(100),
+          getIntegrationStatus().catch(() => ({ integrations: [] })),
+        ]);
         if (!cancelled) {
-          setLiveAuditLog(result);
+          setLiveAuditLog(auditResult);
+          setIntegrations(integResult.integrations || []);
         }
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : "Failed to load audit log");
+          setError(e instanceof Error ? e.message : "Failed to load admin data");
         }
       } finally {
         if (!cancelled) setIsLoading(false);
       }
     }
-    fetchAuditLog();
+    fetchData();
     return () => { cancelled = true; };
   }, []);
+
+  const connectedCount = integrations.filter(i => i.status === "connected").length;
+  const totalCount = integrations.length;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -43,7 +53,7 @@ export default function AdminPanel() {
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Shield className="w-5 h-5 text-blue-400" /> Administration
           </h2>
-          <p className="text-xs text-zinc-500">Enterprise controls: SSO, audit trail, permissions</p>
+          <p className="text-xs text-zinc-500">Audit trail, integrations, and access controls</p>
         </div>
 
         {/* Error */}
@@ -57,6 +67,7 @@ export default function AdminPanel() {
         <div className="flex border-b border-zinc-800">
           {([
             { id: "audit" as const, icon: Activity, label: "Audit Log" },
+            { id: "integrations" as const, icon: Plug, label: `Integrations (${connectedCount}/${totalCount})` },
             { id: "security" as const, icon: Lock, label: "Security" },
           ]).map(tab => (
             <button
@@ -131,52 +142,88 @@ export default function AdminPanel() {
           </div>
         )}
 
+        {/* Integrations */}
+        {activeSection === "integrations" && (
+          <div className="space-y-4">
+            {isLoading && (
+              <div className="flex items-center justify-center py-8 gap-2 text-zinc-400 text-xs">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading integration status...
+              </div>
+            )}
+            {!isLoading && integrations.length > 0 && (
+              <>
+                {/* Group by category */}
+                {["ai", "vendor", "literature", "eln", "infrastructure"].map(category => {
+                  const items = integrations.filter(i => i.category === category);
+                  if (items.length === 0) return null;
+                  const categoryLabels: Record<string, string> = {
+                    ai: "AI / Models",
+                    vendor: "Chemical Vendors",
+                    literature: "Literature & Data",
+                    eln: "ELN / Lab Systems",
+                    infrastructure: "Infrastructure",
+                  };
+                  return (
+                    <div key={category}>
+                      <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+                        {categoryLabels[category] || category}
+                      </div>
+                      <div className="space-y-2">
+                        {items.map(item => (
+                          <div key={item.name} className="flex items-center gap-3 p-3 rounded-lg bg-zinc-950 border border-zinc-800">
+                            {item.status === "connected" ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : (
+                              <XCircle className="w-4 h-4 text-zinc-600 shrink-0" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-medium text-zinc-200">{item.name}</span>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                                  item.status === "connected"
+                                    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                                    : "bg-zinc-800 text-zinc-500 border-zinc-700"
+                                }`}>
+                                  {item.status === "connected" ? "Connected" : "Not configured"}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-zinc-500 mt-0.5 truncate">{item.detail}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+            {!isLoading && integrations.length === 0 && !error && (
+              <div className="text-center py-8 text-zinc-500 text-sm">
+                Could not fetch integration status from the server.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Security */}
         {activeSection === "security" && (
           <div className="space-y-4">
-            {/* SSO */}
-            <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-emerald-400" />
-                  <span className="text-sm font-medium text-zinc-200">Single Sign-On (SSO)</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-emerald-400">Enabled</span>
-                  <div className="w-8 h-4 rounded-full bg-emerald-500 relative">
-                    <div className="absolute right-0.5 top-0.5 w-3 h-3 rounded-full bg-white" />
-                  </div>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800">
-                  <div className="text-zinc-500">Provider</div>
-                  <div className="text-zinc-200 font-medium mt-0.5">Okta (SAML 2.0)</div>
-                </div>
-                <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800">
-                  <div className="text-zinc-500">Active Users</div>
-                  <div className="text-zinc-200 font-medium mt-0.5">12 / 25 seats</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Permissions */}
+            {/* Permissions (real from RBAC) */}
             <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800">
               <div className="flex items-center gap-2 mb-3">
                 <Users className="w-4 h-4 text-blue-400" />
-                <span className="text-sm font-medium text-zinc-200">Roles &amp; Permissions</span>
+                <span className="text-sm font-medium text-zinc-200">Roles &amp; Permissions (RBAC)</span>
               </div>
               <div className="space-y-2">
                 {[
-                  { role: "Admin", users: 2, perms: ["Full access", "User management", "Audit logs", "Billing"] },
-                  { role: "Researcher", users: 8, perms: ["Plan routes", "Run experiments", "View analytics", "Export data"] },
-                  { role: "Viewer", users: 2, perms: ["View routes", "View analytics", "Read-only access"] },
+                  { role: "Admin", perms: ["Full access"] },
+                  { role: "Researcher", perms: ["Plan routes", "Execute experiments", "Upload analysis", "Write outcomes", "View all data"] },
+                  { role: "Viewer", perms: ["View routes", "View analytics", "Read-only access"] },
                 ].map(r => (
                   <div key={r.role} className="flex items-center gap-3 p-3 rounded-lg bg-zinc-950 border border-zinc-800">
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-zinc-200">{r.role}</span>
-                        <span className="text-[10px] text-zinc-500">{r.users} users</span>
                       </div>
                       <div className="flex flex-wrap gap-1 mt-1">
                         {r.perms.map(p => (
@@ -200,23 +247,23 @@ export default function AdminPanel() {
                   <div className="text-zinc-500">Environment</div>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <Globe className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-zinc-200 font-medium">AWS VPC (us-east-1)</span>
+                    <span className="text-zinc-200 font-medium">AWS EC2 (us-east-1)</span>
                   </div>
                 </div>
                 <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800">
-                  <div className="text-zinc-500">Data Residency</div>
+                  <div className="text-zinc-500">Data Storage</div>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <Lock className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-zinc-200 font-medium">All data in customer VPC</span>
+                    <span className="text-zinc-200 font-medium">PostgreSQL (encrypted at rest)</span>
                   </div>
                 </div>
                 <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800">
                   <div className="text-zinc-500">Model Inference</div>
-                  <div className="text-zinc-200 font-medium mt-0.5">On-premises GPU (A100)</div>
+                  <div className="text-zinc-200 font-medium mt-0.5">GPU server (RetroTx v2 + RSGPT)</div>
                 </div>
                 <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800">
-                  <div className="text-zinc-500">Compliance</div>
-                  <div className="text-zinc-200 font-medium mt-0.5">SOC 2 Type II (in progress)</div>
+                  <div className="text-zinc-500">Guardrails</div>
+                  <div className="text-zinc-200 font-medium mt-0.5">CWC Schedule 1-3 screening active</div>
                 </div>
               </div>
             </div>
