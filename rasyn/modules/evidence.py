@@ -278,15 +278,19 @@ def _search_local_index(routes: list[dict], top_k: int = 10) -> list[dict]:
         patent_url = None
         patent_number = None
         if "USPTO" in source:
-            # Match "US08551963" or bare "05523424" (7-8 digit patent number)
-            m = re.search(r'US(\d+)', source)
+            # Match full patent ID: "US06599917B1", "US05070087", or bare "05523424"
+            # Google Patents format: no leading zeros, include kind code (B1/B2/A1)
+            m = re.search(r'US(\d+)((?:A|B)\d)?', source)
             if m:
-                patent_number = f"US{m.group(1)}"
+                num = m.group(1).lstrip("0") or "0"
+                kind = m.group(2) or ""
+                patent_number = f"US{num}{kind}"
                 patent_url = f"https://patents.google.com/patent/{patent_number}"
             else:
                 m = re.search(r'\((\d{7,8})\)', source)
                 if m:
-                    patent_number = f"US{m.group(1)}"
+                    num = m.group(1).lstrip("0") or "0"
+                    patent_number = f"US{num}"
                     patent_url = f"https://patents.google.com/patent/{patent_number}"
 
         evidence.append({
