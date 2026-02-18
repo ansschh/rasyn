@@ -1,0 +1,21 @@
+grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2_r3.log 2>/dev/null | head -100; echo "===ALSO CHECKING R1 and R2==="; grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2.log 2>/dev/null | head -100; exit
+-- RUNPOD.IO --
+grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2_r3.log 2>/dev/null | head -100; echo "===ALSO CHECKING R1 and R2==="; grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2.log 2>/dev/null | head -100; exit
+grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2_r3.log 2>/dev/null | head -100; echo "===ALSO CHECKING R1 and R2==="; grep -E "(Validation|val_loss|exact_match|EPOCH|Epoch [0-9]+ done|best)" /workspace/rasyn/train_retro_v2.log 2>/dev/null | head -100; exit
+ _____) ) _   _  ____   _____) )___    __| |
+[?2004l2026-02-11 01:10:12,514 INFO __main__: Loading model from /workspace/rasyn/checkpoints/retro_v2/uspto50k/best for resume...
+2026-02-11 02:16:30,218 INFO rasyn.models.retro.model_v2: V2 model saved to /workspace/rasyn/checkpoints/retro_v2/uspto50k/best/model.pt
+2026-02-11 02:16:30,617 INFO __main__:   New best! val_loss=0.1359 exact=0.5265
+2026-02-11 03:22:40,464 INFO __main__:   No improvement for 5 epochs (patience=15, best_loss=0.1359, best_exact=0.5265)
+2026-02-11 04:28:53,781 INFO __main__:   No improvement for 10 epochs (patience=15, best_loss=0.1359, best_exact=0.5265)
+2026-02-11 05:35:04,071 INFO __main__:   No improvement for 15 epochs (patience=15, best_loss=0.1359, best_exact=0.5265)
+  Best val_loss=0.1359, best_exact=0.5265
+===ALSO CHECKING R1 and R2===
+2026-02-10 19:11:01,753 INFO rasyn.models.retro.model_v2: V2 model saved to /workspace/rasyn/checkpoints/retro_v2/uspto50k/best/model.pt
+2026-02-10 19:11:01,753 INFO __main__:   New best! val_loss=0.1153
+2026-02-10 20:19:29,897 INFO rasyn.models.retro.model_v2: V2 model saved to /workspace/rasyn/checkpoints/retro_v2/uspto50k/best/model.pt
+2026-02-10 20:19:29,897 INFO __main__:   New best! val_loss=0.1035
+2026-02-10 21:28:01,090 INFO rasyn.models.retro.model_v2: V2 model saved to /workspace/rasyn/checkpoints/retro_v2/uspto50k/best/model.pt
+2026-02-10 21:28:01,090 INFO __main__:   New best! val_loss=0.1001
+exit
+Connection to 100.65.13.78 closed.

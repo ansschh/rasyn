@@ -1,0 +1,5 @@
+grep -E "(Epoch.*val_loss|exact_match|Validation|best_val|Early)" /workspace/rasyn/train_retro_v2_r3.log; exit
+grep -E "(Epoch.*val_loss|exact_match|Validation|best_val|Early)" /workspace/rasyn/train_retro_v2_r3.log; exit
+grep -E "(Epoch.*val_loss|exact_match|Validation|best_val|Early)" /workspace/rasyn/train_retro_v2_r3.log; exit
+[?2004h]0;root@39770d1cb22b: /root@39770d1cb22b:/# grep -E "(Epoch.*val_loss|exact_match|Validation|best_val|Eaarly)" /workspace/rasyn/train_retro_v2_r3.log; exit
+[?2004l2026-02-11 01:10:17,211 INFO __main__:   [01;31m[KEarly[m[K stopping patience: 15 epochs

@@ -1,0 +1,7 @@
+grep "Epoch.*val_loss\|val_loss\|exact_match\|New best\|No improvement\|Early stop\|EPOCH DONE\|--- Epoch" /workspace/rasyn/train_retro_v2.log 2>/dev/null; exit
+grep "Epoch.*val_loss\|val_loss\|exact_match\|New best\|No improvement\|Early stop\|EPOCH DONE\|--- Epoch" /workspace/rasyn/train_retro_v2.log 2>/dev/null; exit
+grep "Epoch.*val_loss\|val_loss\|exact_match\|New best\|No improvement\|Early stop\|EPOCH DONE\|--- Epoch" /workspace/rasyn/train_retro_v2.log 2>/dev/null; exit
+[?2004h]0;root@39770d1cb22b: /root@39770d1cb22b:/# grep "Epoch.*val_loss\|val_loss\|exact_match\|New best\|No iimprovement\|Early stop\|EPOCH DONE\|--- Epoch" /workspace/rasyn/train_retro_v2.llog 2>/dev/null; exit
+2026-02-10 19:11:01,753 INFO __main__:   [01;31m[KNew best[m[K! [01;31m[Kval_loss[m[K=0.1153
+2026-02-10 20:19:29,897 INFO __main__:   [01;31m[KNew best[m[K! [01;31m[Kval_loss[m[K=0.1035
+2026-02-10 21:28:01,090 INFO __main__:   [01;31m[KNew best[m[K! [01;31m[Kval_loss[m[K=0.1001
