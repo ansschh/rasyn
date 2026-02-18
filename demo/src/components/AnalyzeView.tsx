@@ -180,7 +180,12 @@ export default function AnalyzeView({ productSmiles, expectedMw }: Props) {
                           <div className="grid grid-cols-3 gap-3">
                             <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-center">
                               <div className="text-[10px] text-zinc-500">Conversion</div>
-                              <div className="text-lg font-bold text-emerald-400">{interp.conversion}%</div>
+                              <div className="text-lg font-bold text-emerald-400">
+                                {interp.conversion != null ? `${interp.conversion}%` : "N/A"}
+                              </div>
+                              {interp.conversion == null && (
+                                <div className="text-[9px] text-zinc-600">Requires calibration</div>
+                              )}
                             </div>
                             <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-center">
                               <div className="text-[10px] text-zinc-500">Purity</div>

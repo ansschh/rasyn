@@ -34,12 +34,26 @@ export interface PlanResult {
 }
 
 export interface ScoreBreakdown {
-  roundtrip_confidence: number | null;
-  step_efficiency: number | null;
-  availability: number | null;
-  safety: number | null;
-  green_chemistry: number | null;
-  precedent: number | null;
+  // Model output (real: beam search logits)
+  model_confidence: number | null;
+  // Route structure (fact)
+  num_steps: number;
+  // Green chemistry (real: RDKit molecular weights)
+  atom_economy_pct: number | null;
+  e_factor: number | null;
+  // Safety (real: RDKit PAINS/BRENK screening)
+  safety_alert_count: number;
+  safety_alerts: string[];
+  tox_flag_count: number;
+  tox_flags: string[];
+  // Evidence (real: Morgan fingerprint + Semantic Scholar/OpenAlex)
+  evidence_count: number;
+  evidence_local_hits: number;
+  evidence_live_hits: number;
+  evidence_top_similarity: number | null;
+  // Starting materials (fact)
+  starting_materials_total: number;
+  all_purchasable: boolean;
 }
 
 export interface ApiRoute {
@@ -87,7 +101,6 @@ export interface EvidenceHit {
 export interface GreenChemResult {
   atom_economy: number | null;
   e_factor: number | null;
-  solvent_score: number | null;
   details: Record<string, unknown> | null;
 }
 
@@ -324,7 +337,7 @@ export async function exportProtocolPdf(
 // ---------------------------------------------------------------------------
 
 export interface AnalysisInterpretation {
-  conversion: number;
+  conversion: number | null;
   purity: number;
   majorProductConfirmed: boolean;
   impurities: { identity: string; percentage: number; flag?: string }[];

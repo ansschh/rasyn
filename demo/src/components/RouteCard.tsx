@@ -1,6 +1,6 @@
 "use client";
 
-import { Shield, TrendingUp, Leaf, FlaskConical, Package, Star, Lightbulb } from "lucide-react";
+import { Shield, Beaker, Leaf, Package, Star, AlertTriangle, BookOpen } from "lucide-react";
 import type { ApiRoute } from "../lib/api";
 
 interface Props {
@@ -9,13 +9,30 @@ interface Props {
   onSelect: () => void;
 }
 
-function ScoreBar({ value, color }: { value: number; color: string }) {
+function MetricRow({ icon, label, value, detail, status }: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  detail?: string;
+  status: "good" | "warn" | "bad" | "neutral";
+}) {
+  const statusColor = {
+    good: "text-emerald-400",
+    warn: "text-amber-400",
+    bad: "text-red-400",
+    neutral: "text-zinc-400",
+  }[status];
+
   return (
-    <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
-      <div
-        className={`h-full rounded-full score-bar-fill ${color}`}
-        style={{ "--fill-width": `${value * 100}%`, width: `${value * 100}%` } as React.CSSProperties}
-      />
+    <div className="flex items-start gap-2 py-1">
+      <div className="shrink-0 mt-0.5">{icon}</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-zinc-400 text-[11px]">{label}</span>
+          <span className={`text-[11px] font-medium ${statusColor}`}>{value}</span>
+        </div>
+        {detail && <div className="text-[10px] text-zinc-600 mt-0.5">{detail}</div>}
+      </div>
     </div>
   );
 }
@@ -23,6 +40,17 @@ function ScoreBar({ value, color }: { value: number; color: string }) {
 export default function RouteCard({ route, selected, onSelect }: Props) {
   const sb = route.score_breakdown;
   const isRecommended = route.rank === 1;
+
+  // Extract raw metrics with safe defaults
+  const confidence = sb?.model_confidence;
+  const alertCount = sb?.safety_alert_count ?? 0;
+  const alertNames = sb?.safety_alerts ?? [];
+  const ae = sb?.atom_economy_pct;
+  const ef = sb?.e_factor;
+  const evCount = sb?.evidence_count ?? 0;
+  const evTopSim = sb?.evidence_top_similarity;
+  const evLocal = sb?.evidence_local_hits ?? 0;
+  const evLive = sb?.evidence_live_hits ?? 0;
 
   return (
     <div
@@ -43,7 +71,12 @@ export default function RouteCard({ route, selected, onSelect }: Props) {
             </span>
           )}
         </div>
-        <div className="text-2xl font-bold text-emerald-400">{Math.round(route.overall_score * 100)}</div>
+        {confidence != null && (
+          <div className="text-right">
+            <div className="text-xl font-bold text-emerald-400">{(confidence * 100).toFixed(1)}%</div>
+            <div className="text-[9px] text-zinc-500">model confidence</div>
+          </div>
+        )}
       </div>
 
       {/* Badges */}
@@ -52,70 +85,73 @@ export default function RouteCard({ route, selected, onSelect }: Props) {
           <span className="text-[10px] px-2 py-0.5 rounded-full border bg-emerald-500/15 text-emerald-400 border-emerald-500/30">All Purchasable</span>
         )}
         <span className="text-[10px] px-2 py-0.5 rounded-full border bg-blue-500/15 text-blue-400 border-blue-500/30">
-          {route.num_steps} steps
+          {route.num_steps} step{route.num_steps !== 1 ? "s" : ""}
         </span>
         <span className="text-[10px] px-2 py-0.5 rounded-full border bg-zinc-500/15 text-zinc-400 border-zinc-500/30">
-          {route.starting_materials.length} reagents
+          {route.starting_materials.length} reagent{route.starting_materials.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      {/* Score Breakdown */}
+      {/* Raw Metrics */}
       {sb && (
-        <div className="space-y-2 text-[11px]">
-          {sb.safety != null && (
-            <div className="flex items-center gap-2">
-              <Shield className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Safety</span>
-              <ScoreBar value={sb.safety} color="bg-emerald-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.safety * 100)}</span>
-            </div>
+        <div className="divide-y divide-zinc-800/50">
+          {/* Safety */}
+          <MetricRow
+            icon={alertCount === 0
+              ? <Shield className="w-3.5 h-3.5 text-emerald-500" />
+              : <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />}
+            label="Safety (PAINS/BRENK)"
+            value={alertCount === 0 ? "Clear" : `${alertCount} alert${alertCount > 1 ? "s" : ""}`}
+            detail={alertCount > 0 ? alertNames.join(", ") : undefined}
+            status={alertCount === 0 ? "good" : alertCount > 2 ? "bad" : "warn"}
+          />
+
+          {/* Atom Economy */}
+          {ae != null && (
+            <MetricRow
+              icon={<Leaf className="w-3.5 h-3.5 text-green-500" />}
+              label="Atom Economy"
+              value={`${ae.toFixed(1)}%`}
+              detail="RDKit molecular weight calculation"
+              status={ae > 70 ? "good" : ae > 40 ? "warn" : "bad"}
+            />
           )}
-          {sb.step_efficiency != null && (
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Efficiency</span>
-              <ScoreBar value={sb.step_efficiency} color="bg-blue-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.step_efficiency * 100)}</span>
-            </div>
+
+          {/* E-Factor */}
+          {ef != null && (
+            <MetricRow
+              icon={<Beaker className="w-3.5 h-3.5 text-teal-500" />}
+              label="E-Factor"
+              value={ef.toFixed(2)}
+              detail="Waste/product MW ratio (lower = greener)"
+              status={ef < 1.0 ? "good" : ef < 5.0 ? "warn" : "bad"}
+            />
           )}
-          {sb.green_chemistry != null && (
-            <div className="flex items-center gap-2">
-              <Leaf className="w-3.5 h-3.5 text-green-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Greenness</span>
-              <ScoreBar value={sb.green_chemistry} color="bg-green-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.green_chemistry * 100)}</span>
-            </div>
-          )}
-          {sb.precedent != null && (
-            <div className="flex items-center gap-2">
-              <FlaskConical className="w-3.5 h-3.5 text-purple-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Precedent</span>
-              <ScoreBar value={sb.precedent} color="bg-purple-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.precedent * 100)}</span>
-            </div>
-          )}
-          {sb.availability != null && (
-            <div className="flex items-center gap-2">
-              <Package className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Availability</span>
-              <ScoreBar value={sb.availability} color="bg-cyan-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.availability * 100)}</span>
-            </div>
-          )}
-          {sb.roundtrip_confidence != null && (
-            <div className="flex items-center gap-2">
-              <Lightbulb className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="text-zinc-400 w-20">Confidence</span>
-              <ScoreBar value={sb.roundtrip_confidence} color="bg-amber-500" />
-              <span className="text-zinc-300 w-8 text-right">{Math.round(sb.roundtrip_confidence * 100)}</span>
-            </div>
-          )}
+
+          {/* Evidence */}
+          <MetricRow
+            icon={<BookOpen className="w-3.5 h-3.5 text-purple-500" />}
+            label="Literature Evidence"
+            value={evCount > 0
+              ? `${evCount} hit${evCount > 1 ? "s" : ""}${evTopSim != null ? ` (${(evTopSim * 100).toFixed(0)}% sim)` : ""}`
+              : "None found"}
+            detail={evCount > 0 ? `${evLocal} reaction match${evLocal !== 1 ? "es" : ""}, ${evLive} paper${evLive !== 1 ? "s" : ""}` : undefined}
+            status={evCount >= 3 ? "good" : evCount > 0 ? "neutral" : "neutral"}
+          />
+
+          {/* Availability */}
+          <MetricRow
+            icon={<Package className="w-3.5 h-3.5 text-cyan-500" />}
+            label="Starting Materials"
+            value={route.all_purchasable ? "All available" : `${sb.starting_materials_total} identified`}
+            status={route.all_purchasable ? "good" : "neutral"}
+          />
         </div>
       )}
 
-      {/* No breakdown available */}
+      {/* No metrics available */}
       {!sb && (
-        <div className="text-[10px] text-zinc-500 italic">Score breakdown not available</div>
+        <div className="text-[10px] text-zinc-500 italic">Metrics not available</div>
       )}
     </div>
   );

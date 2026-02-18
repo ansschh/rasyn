@@ -319,125 +319,101 @@ def generate_insights(
 def explain_ranking(route: dict, comparison_route: dict | None = None) -> dict:
     """Explain why a route was ranked as it was.
 
-    Analyzes score_breakdown and route properties to generate
-    human-readable explanations for each ranking factor.
+    Uses honest raw metrics — every value cited is real, computed data.
     """
-    breakdown = route.get("score_breakdown") or {}
-    num_steps = route.get("num_steps", len(route.get("steps", [])))
-    purchasable = route.get("all_purchasable", False)
-    overall = route.get("overall_score", 0)
+    m = route.get("score_breakdown") or route.get("metrics") or {}
+    num_steps = m.get("num_steps", len(route.get("steps", [])))
+    purchasable = m.get("all_purchasable", route.get("all_purchasable", False))
+    confidence = m.get("model_confidence", route.get("overall_score"))
 
     factors = []
 
-    # 1. Round-trip confidence
-    rt = breakdown.get("roundtrip_confidence")
-    if rt is not None:
-        impact = "positive" if rt > 0.7 else "neutral" if rt > 0.4 else "negative"
+    # 1. Model confidence (REAL: from beam search)
+    if confidence is not None:
+        impact = "positive" if confidence > 0.7 else "neutral" if confidence > 0.4 else "negative"
         factors.append({
-            "factor": "Round-trip Confidence",
-            "value": f"{rt:.0%}",
+            "factor": "Model Confidence",
+            "value": f"{confidence:.1%}",
             "impact": impact,
-            "detail": (
-                f"Forward model verification score of {rt:.0%}. "
-                + ("High confidence that predicted reactants produce the target."
-                   if rt > 0.7 else "Moderate confidence — manual verification recommended.")
-            ),
+            "detail": f"Average beam search confidence across {num_steps} step(s). Routes are ranked by this metric.",
         })
 
-    # 2. Step efficiency
-    se = breakdown.get("step_efficiency")
-    if se is not None:
-        impact = "positive" if se > 0.7 else "neutral" if se > 0.4 else "negative"
+    # 2. Step count (FACT)
+    factors.append({
+        "factor": "Step Count",
+        "value": str(num_steps),
+        "impact": "positive" if num_steps <= 3 else "neutral" if num_steps <= 5 else "negative",
+        "detail": f"Route has {num_steps} synthetic step(s).",
+    })
+
+    # 3. Atom economy (REAL: RDKit MW calculation)
+    ae = m.get("atom_economy_pct")
+    if ae is not None:
+        impact = "positive" if ae > 70 else "neutral" if ae > 40 else "negative"
         factors.append({
-            "factor": "Step Efficiency",
-            "value": f"{num_steps} steps ({se:.0%})",
+            "factor": "Atom Economy",
+            "value": f"{ae:.1f}%",
             "impact": impact,
-            "detail": f"Route has {num_steps} step(s). Shorter routes score higher for practical feasibility.",
+            "detail": f"Calculated from RDKit molecular weights: {ae:.1f}% of reactant atoms incorporated into product.",
         })
 
-    # 3. Commercial availability
-    avail = breakdown.get("availability")
-    if avail is not None:
-        impact = "positive" if purchasable else "negative" if avail < 0.5 else "neutral"
+    # 4. E-factor (REAL: RDKit MW calculation)
+    ef = m.get("e_factor")
+    if ef is not None:
+        impact = "positive" if ef < 1.0 else "neutral" if ef < 5.0 else "negative"
         factors.append({
-            "factor": "Starting Material Availability",
-            "value": f"{avail:.0%}" + (" (all purchasable)" if purchasable else ""),
+            "factor": "E-Factor",
+            "value": f"{ef:.2f}",
             "impact": impact,
-            "detail": (
-                "All starting materials are commercially available."
-                if purchasable
-                else "Some starting materials may need custom synthesis or alternate sourcing."
-            ),
+            "detail": f"Waste-to-product ratio by molecular weight. Ideal = 0, pharma typical = 25-100.",
         })
 
-    # 4. Safety score
-    safety = breakdown.get("safety")
-    if safety is not None:
-        impact = "positive" if safety > 0.8 else "neutral" if safety > 0.5 else "negative"
+    # 5. Safety alerts (REAL: RDKit PAINS/BRENK)
+    alert_count = m.get("safety_alert_count", 0)
+    alert_names = m.get("safety_alerts", [])
+    impact = "positive" if alert_count == 0 else "negative" if alert_count > 2 else "neutral"
+    detail = "No structural alerts from PAINS/BRENK screening." if alert_count == 0 else f"Alerts: {', '.join(alert_names[:3])}"
+    factors.append({
+        "factor": "Safety Alerts",
+        "value": f"{alert_count} alert(s)",
+        "impact": impact,
+        "detail": detail,
+    })
+
+    # 6. Evidence (REAL: fingerprint search + live APIs)
+    ev_count = m.get("evidence_count", 0)
+    top_sim = m.get("evidence_top_similarity")
+    local = m.get("evidence_local_hits", 0)
+    live = m.get("evidence_live_hits", 0)
+    if ev_count > 0:
+        sim_str = f", top Tanimoto: {top_sim:.2f}" if top_sim else ""
         factors.append({
-            "factor": "Safety Profile",
-            "value": f"{safety:.0%}",
-            "impact": impact,
-            "detail": (
-                "No significant safety alerts detected."
-                if safety > 0.8
-                else "Some structural alerts or hazardous intermediates flagged."
-            ),
+            "factor": "Literature Evidence",
+            "value": f"{ev_count} hit(s)",
+            "impact": "positive" if ev_count >= 3 else "neutral",
+            "detail": f"{local} local reaction match(es), {live} published paper(s){sim_str}.",
+        })
+    else:
+        factors.append({
+            "factor": "Literature Evidence",
+            "value": "None found",
+            "impact": "neutral",
+            "detail": "No similar reactions found in USPTO index or literature APIs.",
         })
 
-    # 5. Green chemistry
-    green = breakdown.get("green_chemistry")
-    if green is not None:
-        impact = "positive" if green > 0.7 else "neutral" if green > 0.4 else "negative"
-        factors.append({
-            "factor": "Green Chemistry Score",
-            "value": f"{green:.0%}",
-            "impact": impact,
-            "detail": "Atom economy, E-factor, and solvent greenness assessment.",
-        })
+    # 7. Starting material availability (FACT)
+    sm_total = m.get("starting_materials_total", 0)
+    factors.append({
+        "factor": "Starting Materials",
+        "value": f"{'All purchasable' if purchasable else f'{sm_total} identified'}",
+        "impact": "positive" if purchasable else "neutral",
+        "detail": "All starting materials are commercially available." if purchasable else "Availability not yet confirmed for all materials.",
+    })
 
-    # 6. Literature precedent
-    precedent = breakdown.get("precedent")
-    if precedent is not None:
-        impact = "positive" if precedent > 0.6 else "neutral" if precedent > 0.3 else "negative"
-        factors.append({
-            "factor": "Literature Precedent",
-            "value": f"{precedent:.0%}",
-            "impact": impact,
-            "detail": (
-                "Strong literature support — similar transformations have been published."
-                if precedent > 0.6
-                else "Limited precedent found. Novel chemistry may require more optimization."
-            ),
-        })
-
-    # If no breakdown available, provide generic explanation
-    if not factors:
-        factors = [
-            {
-                "factor": "Overall Score",
-                "value": f"{overall:.0%}",
-                "impact": "positive" if overall > 0.7 else "neutral",
-                "detail": f"Composite score based on model confidence, step count ({num_steps}), and availability.",
-            },
-            {
-                "factor": "Step Count",
-                "value": str(num_steps),
-                "impact": "positive" if num_steps <= 3 else "neutral" if num_steps <= 5 else "negative",
-                "detail": f"Route has {num_steps} synthetic step(s).",
-            },
-            {
-                "factor": "Purchasability",
-                "value": "Yes" if purchasable else "Partial",
-                "impact": "positive" if purchasable else "neutral",
-                "detail": "All starting materials are purchasable." if purchasable else "Some materials need sourcing.",
-            },
-        ]
-
-    # Comparison question
+    # Comparison
     if comparison_route:
-        comp_score = comparison_route.get("overall_score", 0)
-        question = f"Why was this route (score {overall:.2f}) ranked above the alternative (score {comp_score:.2f})?"
+        comp_conf = (comparison_route.get("score_breakdown") or {}).get("model_confidence", comparison_route.get("overall_score", 0))
+        question = f"Why was this route (confidence {confidence:.1%}) ranked above the alternative (confidence {comp_conf:.1%})?"
     else:
         question = f"Why was this route ranked #{route.get('rank', '?')}?"
 

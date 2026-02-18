@@ -102,7 +102,7 @@ def score_routes(target_smiles: str, routes: list[dict]) -> dict:
     Returns dict matching GreenChemResult schema.
     """
     if not routes:
-        return {"atom_economy": None, "e_factor": None, "solvent_score": None, "details": {}}
+        return {"atom_economy": None, "e_factor": None, "details": {}}
 
     # Score the best route (rank 1)
     best_route = routes[0]
@@ -128,7 +128,6 @@ def score_routes(target_smiles: str, routes: list[dict]) -> dict:
     return {
         "atom_economy": avg_ae,
         "e_factor": avg_ef,
-        "solvent_score": 0.5,  # Default — need reaction conditions for real score
         "details": {
             "per_step_atom_economy": ae_values,
             "per_step_e_factor": ef_values,

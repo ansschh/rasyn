@@ -1,114 +1,105 @@
-"""Composite route scoring and ranking.
+"""Honest route metrics — raw values only, no fabricated composite scores.
 
-Produces a single overall score per route from multiple dimensions:
-- Round-trip confidence (model + forward validation)
-- Step count penalty
-- Commercial availability of starting materials
-- Safety (from PAINS/BRENK screening)
-- Green chemistry (atom economy + E-factor + solvent)
-- Literature precedent
+Every metric is either:
+- Computed from real chemistry (RDKit molecular weights, fingerprint similarity)
+- Directly from model output (beam search confidence)
+- A factual count (number of alerts, number of steps)
+
+Nothing is normalized into a fake 0-1 range with arbitrary weights.
 """
 
 from __future__ import annotations
 
 import logging
-from statistics import mean
 
 logger = logging.getLogger(__name__)
 
 
-def score_route(
+def compute_route_metrics(
     route: dict,
     safety: dict | None = None,
     green: dict | None = None,
     evidence: list[dict] | None = None,
 ) -> dict:
-    """Compute composite scores for a retrosynthetic route.
+    """Compute honest, raw metrics for a retrosynthetic route.
 
-    Args:
-        route: Route dict with steps, starting_materials, etc.
-        safety: Safety screening result from safety module.
-        green: Green chemistry scoring result from green module.
-        evidence: List of EvidenceHit dicts from evidence module.
-
-    Returns:
-        Dict with per-dimension scores and overall composite score.
+    Returns a dict of real values — no composite score, no arbitrary weights.
     """
     steps = route.get("steps", [])
     if not steps:
-        return {"overall": 0.0, "breakdown": {}}
+        return {"metrics": {}, "rank_key": 0.0}
 
-    # 1. Round-trip confidence
-    confidences = [s.get("score", 0.5) for s in steps]
-    rt_score = mean(confidences) if confidences else 0.5
+    # --- Model confidence (REAL: from beam search / model logits) ---
+    confidences = [s.get("score") for s in steps if s.get("score") is not None]
+    avg_confidence = sum(confidences) / len(confidences) if confidences else None
 
-    # 2. Step count penalty — fewer steps is better
-    n = len(steps)
-    step_penalty = 1.0 / (1 + 0.15 * n)
+    # --- Step count (FACT: just a count) ---
+    num_steps = len(steps)
 
-    # 3. Commercial availability of starting materials
-    sm = route.get("starting_materials", [])
-    all_purchasable = route.get("all_purchasable", False)
-    if all_purchasable:
-        avail_score = 1.0
-    elif sm:
-        # Estimate: check inventory coverage (default assumes partial)
-        avail_score = 0.5
-    else:
-        avail_score = 0.3
-
-    # 4. Safety score (from PAINS/BRENK alerts)
-    safety_score = 1.0
-    if safety:
-        n_alerts = len(safety.get("alerts", []))
-        n_tox = len(safety.get("tox_flags", []))
-        safety_score = max(0.0, 1.0 - n_alerts * 0.15 - n_tox * 0.1)
-
-    # 5. Green chemistry score
-    green_score = 0.5  # default
+    # --- Atom economy % (REAL: from RDKit molecular weights) ---
+    atom_economy_pct = None
+    e_factor = None
     if green:
-        ae = green.get("atom_economy")
-        ef = green.get("e_factor")
-        sol = green.get("solvent_score")
-        components = []
-        if ae is not None:
-            components.append(min(ae / 100.0, 1.0))
-        if ef is not None:
-            components.append(max(0.0, 1.0 - ef * 0.1))
-        if sol is not None:
-            components.append(sol)
-        if components:
-            green_score = mean(components)
+        atom_economy_pct = green.get("atom_economy")  # already a real % from RDKit
+        e_factor = green.get("e_factor")  # real waste/product MW ratio
 
-    # 6. Precedent score — from real evidence search
-    from rasyn.modules.evidence import compute_precedent_score
-    precedent_score = compute_precedent_score(evidence or [])
+    # --- Safety (REAL: from RDKit FilterCatalog PAINS/BRENK screening) ---
+    alert_count = 0
+    alert_names: list[str] = []
+    tox_flag_count = 0
+    tox_flags: list[str] = []
+    if safety:
+        alerts = safety.get("alerts", [])
+        alert_count = len(alerts)
+        alert_names = [a.get("name", "unknown") if isinstance(a, dict) else str(a) for a in alerts[:5]]
+        tox_flags_raw = safety.get("tox_flags", [])
+        tox_flag_count = len(tox_flags_raw)
+        tox_flags = [str(f) for f in tox_flags_raw[:5]]
 
-    # Weighted composite
-    weights = {
-        "roundtrip_confidence": 0.30,
-        "step_efficiency": 0.10,
-        "availability": 0.20,
-        "safety": 0.15,
-        "green_chemistry": 0.10,
-        "precedent": 0.15,
+    # --- Evidence (REAL: from fingerprint search + live API) ---
+    evidence_list = evidence or []
+    evidence_count = len(evidence_list)
+    local_hits = [e for e in evidence_list if e.get("similarity", 0) > 0]
+    live_hits = [e for e in evidence_list if e.get("similarity", 0) == 0]
+    top_similarity = max((e["similarity"] for e in local_hits), default=None)
+
+    # --- Starting material availability (FACT: from route data) ---
+    sm = route.get("starting_materials", [])
+    sm_total = len(sm)
+    all_purchasable = route.get("all_purchasable", False)
+
+    metrics = {
+        # Model output (real)
+        "model_confidence": round(avg_confidence, 3) if avg_confidence is not None else None,
+
+        # Route structure (fact)
+        "num_steps": num_steps,
+
+        # Green chemistry (real RDKit calculations)
+        "atom_economy_pct": atom_economy_pct,
+        "e_factor": e_factor,
+
+        # Safety (real RDKit screening)
+        "safety_alert_count": alert_count,
+        "safety_alerts": alert_names,
+        "tox_flag_count": tox_flag_count,
+        "tox_flags": tox_flags,
+
+        # Evidence (real fingerprint + API search)
+        "evidence_count": evidence_count,
+        "evidence_local_hits": len(local_hits),
+        "evidence_live_hits": len(live_hits),
+        "evidence_top_similarity": round(top_similarity, 3) if top_similarity is not None else None,
+
+        # Starting materials (fact)
+        "starting_materials_total": sm_total,
+        "all_purchasable": all_purchasable,
     }
-    breakdown = {
-        "roundtrip_confidence": round(rt_score, 3),
-        "step_efficiency": round(step_penalty, 3),
-        "availability": round(avail_score, 3),
-        "safety": round(safety_score, 3),
-        "green_chemistry": round(green_score, 3),
-        "precedent": round(precedent_score, 3),
-    }
 
-    overall = sum(weights[k] * breakdown[k] for k in weights)
+    # Rank key: model confidence is the only genuinely predictive metric
+    rank_key = avg_confidence if avg_confidence is not None else 0.0
 
-    return {
-        "overall": round(overall, 3),
-        "breakdown": breakdown,
-        "weights": weights,
-    }
+    return {"metrics": metrics, "rank_key": rank_key}
 
 
 def score_and_rank_routes(
@@ -117,56 +108,22 @@ def score_and_rank_routes(
     green: dict | None = None,
     evidence: list[dict] | None = None,
 ) -> list[dict]:
-    """Score and re-rank all routes by composite score.
+    """Compute metrics and rank routes by model confidence.
 
-    Updates routes in-place with score_breakdown and re-ranks them.
-    Returns the sorted route list.
+    Updates routes in-place with raw metrics. Ranks by the only real
+    predictive signal: average model confidence across steps.
     """
     for route in routes:
-        scores = score_route(route, safety=safety, green=green, evidence=evidence)
-        route["overall_score"] = scores["overall"]
-        route["score_breakdown"] = scores["breakdown"]
+        result = compute_route_metrics(route, safety=safety, green=green, evidence=evidence)
+        route["metrics"] = result["metrics"]
+        # Keep overall_score as model confidence for backward compat with frontend sorting
+        route["overall_score"] = result["rank_key"]
+        # Map to score_breakdown for backward compat (frontend reads this)
+        route["score_breakdown"] = result["metrics"]
 
-    # Re-rank by overall score (descending)
+    # Rank by model confidence (descending)
     routes.sort(key=lambda r: r.get("overall_score", 0), reverse=True)
     for i, route in enumerate(routes):
         route["rank"] = i + 1
 
     return routes
-
-
-def explain_ranking(route: dict) -> list[dict]:
-    """Generate human-readable explanations for why a route ranks where it does.
-
-    Returns list of {factor, value, impact, description} dicts.
-    """
-    breakdown = route.get("score_breakdown", {})
-    explanations = []
-
-    factor_labels = {
-        "roundtrip_confidence": ("Model Confidence", "How well the forward model validates predicted reactions"),
-        "step_efficiency": ("Step Count", "Fewer synthesis steps means simpler execution"),
-        "availability": ("Starting Material Availability", "Whether starting materials are commercially purchasable"),
-        "safety": ("Safety Profile", "Absence of structural alerts (PAINS/BRENK) and hazardous groups"),
-        "green_chemistry": ("Green Chemistry", "Atom economy, E-factor, and solvent sustainability"),
-        "precedent": ("Literature Precedent", "Similarity to known reactions in the literature"),
-    }
-
-    for key, (label, description) in factor_labels.items():
-        value = breakdown.get(key, 0.5)
-        if value >= 0.8:
-            impact = "positive"
-        elif value >= 0.5:
-            impact = "neutral"
-        else:
-            impact = "negative"
-
-        explanations.append({
-            "factor": label,
-            "value": f"{value:.0%}",
-            "raw_value": value,
-            "impact": impact,
-            "description": description,
-        })
-
-    return explanations

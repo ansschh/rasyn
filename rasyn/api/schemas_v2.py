@@ -55,20 +55,40 @@ class Step(BaseModel):
 
 
 class ScoreBreakdown(BaseModel):
-    roundtrip_confidence: float | None = None
-    step_efficiency: float | None = None
-    availability: float | None = None
-    safety: float | None = None
-    green_chemistry: float | None = None
-    precedent: float | None = None
+    """Raw, honest metrics — every value computed from real data or model output."""
+    # Model output (real: from beam search logits)
+    model_confidence: float | None = None
+
+    # Route structure (fact)
+    num_steps: int = 0
+
+    # Green chemistry (real: RDKit molecular weights)
+    atom_economy_pct: float | None = None  # percentage, e.g. 87.3
+    e_factor: float | None = None  # waste/product ratio, lower = better
+
+    # Safety (real: RDKit PAINS/BRENK screening)
+    safety_alert_count: int = 0
+    safety_alerts: list[str] = Field(default_factory=list)
+    tox_flag_count: int = 0
+    tox_flags: list[str] = Field(default_factory=list)
+
+    # Evidence (real: Morgan fingerprint Tanimoto + Semantic Scholar/OpenAlex)
+    evidence_count: int = 0
+    evidence_local_hits: int = 0
+    evidence_live_hits: int = 0
+    evidence_top_similarity: float | None = None
+
+    # Starting materials (fact: from route + vendor lookup)
+    starting_materials_total: int = 0
+    all_purchasable: bool = False
 
 
 class Route(BaseModel):
     route_id: str = Field(..., description="Unique route identifier")
     rank: int = Field(..., description="Rank (1 = best)")
     steps: list[Step] = Field(..., description="Retrosynthetic steps")
-    overall_score: float = Field(..., description="Combined route score 0-1")
-    score_breakdown: ScoreBreakdown | None = Field(None, description="Per-dimension score breakdown")
+    overall_score: float = Field(..., description="Model confidence (avg beam search score, 0-1)")
+    score_breakdown: ScoreBreakdown | None = Field(None, description="Raw metrics — all values from real computation")
     num_steps: int = Field(..., description="Total number of steps")
     starting_materials: list[str] = Field(
         default_factory=list, description="Terminal starting materials SMILES"
@@ -120,9 +140,8 @@ class EvidenceHit(BaseModel):
 # ---------------------------------------------------------------------------
 
 class GreenChemResult(BaseModel):
-    atom_economy: float | None = None
-    e_factor: float | None = None
-    solvent_score: float | None = None  # 0-1 (1 = greenest)
+    atom_economy: float | None = None  # percentage from RDKit MW calculation
+    e_factor: float | None = None  # waste/product MW ratio from RDKit
     details: dict | None = None
 
 
@@ -265,7 +284,7 @@ class Impurity(BaseModel):
 
 
 class AnalysisInterpretation(BaseModel):
-    conversion: float = 0
+    conversion: float | None = None  # None = requires calibration standard
     purity: float = 0
     majorProductConfirmed: bool = False
     impurities: list[Impurity] = Field(default_factory=list)

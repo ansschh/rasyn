@@ -382,8 +382,8 @@ def interpret_lcms(
     conversion = 0.0
     if tic:
         max_tic = max(tic) if tic else 1
-        # Simple heuristic: if product peak is dominant
-        conversion = 95.0 if product_found else 50.0
+        # Cannot determine conversion from MS alone — requires quantitative calibration
+        conversion = None
 
     # Count major peaks as potential impurities
     major_peaks = 0
@@ -440,7 +440,9 @@ def interpret_hplc(
     product_area = main_peak.get("area_percent", 0)
 
     purity = round(product_area, 1) if total_area > 0 else 0.0
-    conversion = round(min(purity * 1.05, 100.0), 1)  # Rough estimate
+    # HPLC purity is the area% of the main peak — NOT conversion
+    # Conversion requires a reference standard; we only have area%
+    conversion = None  # Cannot determine without calibration
 
     impurities = []
     for p in peaks[1:5]:  # Top impurities

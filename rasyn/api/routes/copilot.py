@@ -201,9 +201,6 @@ def _build_context_from_job(job_id: str) -> str:
             ef = green.get("e_factor")
             if ef is not None:
                 parts.append(f"  E-factor: {ef:.2f}")
-            sol = green.get("solvent_score")
-            if sol is not None:
-                parts.append(f"  Solvent sustainability: {sol:.0%}")
 
         # Sourcing
         sourcing = result.get("sourcing")
