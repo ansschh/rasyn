@@ -130,11 +130,13 @@ def evaluate_pretrain(model, val_loader, tokenizer, device, max_batches=100,
               help="Gradient accumulation steps for larger effective batch")
 @click.option("--bf16", is_flag=True, help="Use bf16 mixed precision (H100/A100)")
 @click.option("--device", default="auto")
+@click.option("--resume", default=None, help="Path to checkpoint dir to resume from (e.g. checkpoints/retro_v2/pretrained_full_1B/best)")
+@click.option("--start-epoch", default=1, type=int, help="Epoch to start from when resuming (skips earlier epochs)")
 def main(
     data, output_dir, epochs, batch_size, lr, d_model, nhead, n_layers, d_ff,
     max_src_len, max_tgt_len, warmup_steps, label_smoothing,
     conditioning_dropout, val_split, patience, eval_every,
-    grad_accum, bf16, device,
+    grad_accum, bf16, device, resume, start_epoch,
 ):
     """Pre-train RetroTransformer v2 on USPTO-FULL."""
     if device == "auto":
@@ -193,11 +195,32 @@ def main(
         "num_rxn_classes": 11,  # Keep for compatibility with fine-tune
     }
 
-    from rasyn.models.retro.model_v2 import RetroTransformerV2, save_retro_model_v2
+    from rasyn.models.retro.model_v2 import RetroTransformerV2, save_retro_model_v2, load_retro_model_v2
     model = RetroTransformerV2(**model_config).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {total_params:,} ({total_params/1e9:.2f}B)")
+
+    # Resume from checkpoint if specified
+    resume_optimizer_state = None
+    if resume:
+        resume_path = PROJECT_ROOT / resume
+        model_file = resume_path / "model.pt"
+        if model_file.exists():
+            logger.info(f"Loading model weights from {resume_path}...")
+            ckpt = torch.load(model_file, map_location=device, weights_only=False)
+            if "model_state_dict" in ckpt:
+                model.load_state_dict(ckpt["model_state_dict"])
+            else:
+                model.load_state_dict(ckpt)
+            logger.info(f"  Resumed model from {resume_path}")
+            # Check for optimizer state
+            opt_file = resume_path / "optimizer.pt"
+            if opt_file.exists():
+                resume_optimizer_state = torch.load(opt_file, map_location=device, weights_only=False)
+                logger.info(f"  Found optimizer state, will resume optimizer too")
+        else:
+            logger.warning(f"No model.pt found at {resume_path}, starting fresh")
 
     # Mixed precision setup
     use_amp = bf16 and device == "cuda" and torch.cuda.is_bf16_supported()
@@ -232,14 +255,41 @@ def main(
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     loss_fn = nn.NLLLoss(ignore_index=tokenizer.pad_token_id)
 
+    # Resume optimizer state if available
+    if resume_optimizer_state:
+        try:
+            optimizer.load_state_dict(resume_optimizer_state["optimizer_state_dict"])
+            if "scheduler_state_dict" in resume_optimizer_state:
+                scheduler.load_state_dict(resume_optimizer_state["scheduler_state_dict"])
+            if "global_step" in resume_optimizer_state:
+                global_step_init = resume_optimizer_state["global_step"]
+            else:
+                global_step_init = 0
+            logger.info(f"  Resumed optimizer (global_step={global_step_init})")
+        except Exception as e:
+            logger.warning(f"  Failed to load optimizer state: {e}, starting fresh optimizer")
+            resume_optimizer_state = None
+
+    # If resuming without optimizer state, step scheduler forward
+    if resume and not resume_optimizer_state and start_epoch > 1:
+        steps_per_epoch = len(train_loader) // grad_accum
+        skip_steps = steps_per_epoch * (start_epoch - 1)
+        logger.info(f"  Stepping scheduler forward {skip_steps} steps to match epoch {start_epoch}...")
+        for _ in range(skip_steps):
+            scheduler.step()
+
     log_file = output_path / "pretrain_log.jsonl"
     best_val_loss = float("inf")
     epochs_without_improvement = 0
-    global_step = 0
+    global_step = resume_optimizer_state["global_step"] if resume_optimizer_state and "global_step" in resume_optimizer_state else 0
+    if resume and not resume_optimizer_state and start_epoch > 1:
+        global_step = (len(train_loader) // grad_accum) * (start_epoch - 1)
     accum_step = 0
 
     effective_batch = batch_size * grad_accum
-    logger.info(f"Pre-training for {epochs} epochs, {total_steps} optimizer steps")
+    remaining_epochs = epochs - start_epoch + 1
+    logger.info(f"Pre-training for {epochs} epochs ({remaining_epochs} remaining), {total_steps} total optimizer steps")
+    logger.info(f"  Starting from epoch {start_epoch}, global_step {global_step}")
     logger.info(f"  LR: {lr}, warmup: {warmup_steps}, label_smoothing: {label_smoothing}")
     logger.info(f"  Batch: {batch_size} x grad_accum={grad_accum} = {effective_batch} effective")
     logger.info(f"  d_model: {d_model}, layers: {n_layers}, d_ff: {d_ff}, heads: {nhead}")
@@ -247,7 +297,7 @@ def main(
     model.train()
     start_time = time.time()
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_loss = 0.0
         epoch_correct = 0
         epoch_tokens = 0
@@ -355,12 +405,19 @@ def main(
                 metrics["type"] = "validation"
                 f.write(json.dumps(metrics) + "\n")
 
-        # Periodic checkpoint
+        # Periodic checkpoint (model + optimizer state for resume)
         if epoch % 5 == 0:
             save_retro_model_v2(
                 model, tokenizer, output_path / f"epoch_{epoch}",
                 config=model_config, extra={"epoch": epoch},
             )
+            # Save optimizer state for resume
+            torch.save({
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "global_step": global_step,
+                "epoch": epoch,
+            }, output_path / f"epoch_{epoch}" / "optimizer.pt")
 
     # Final save
     save_retro_model_v2(
