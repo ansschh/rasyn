@@ -698,7 +698,26 @@ def main(
         if (resume_path / "model.pt").exists():
             logger.info(f"Loading model from {resume_path} for resume...")
             from rasyn.models.retro.model_v2 import load_retro_model_v2
-            model, _ = load_retro_model_v2(str(resume_path / "model.pt"), device=device)
+            model, ckpt_tokenizer = load_retro_model_v2(str(resume_path / "model.pt"), device=device)
+            # Use checkpoint's tokenizer to preserve token-ID alignment with
+            # pretrained embeddings.  Rebuild data with this tokenizer below.
+            if ckpt_tokenizer.vocab_size != tokenizer.vocab_size:
+                logger.warning(
+                    f"Tokenizer mismatch: checkpoint has {ckpt_tokenizer.vocab_size} tokens, "
+                    f"data-built has {tokenizer.vocab_size}. Using checkpoint tokenizer."
+                )
+            tokenizer = ckpt_tokenizer
+            # Reload datasets with the checkpoint tokenizer
+            train_dataset, val_dataset = load_retro_data_v2(
+                data_path=data_path,
+                tokenizer=tokenizer,
+                val_split=val_split,
+                max_src_len=max_src_len,
+                max_tgt_len=max_tgt_len,
+                conditioning_dropout=conditioning_dropout,
+                use_reaction_class=use_rxn_class,
+            )
+            logger.info(f"Reloaded data with checkpoint tokenizer: Train={len(train_dataset)}, Val={len(val_dataset)}")
             model.train()
             resume_dir = resume_path
             logger.info("Model loaded for resume")
