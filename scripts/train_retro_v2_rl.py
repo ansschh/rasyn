@@ -80,7 +80,7 @@ def main(
     from rasyn.models.retro.model_v2_rl import RetroTransformerV2WithValueHead
     policy_model = RetroTransformerV2WithValueHead(
         base_model=sft_model,
-        d_model=sft_model.src_embedding.embedding_dim,
+        d_model=sft_model.d_model,
     ).to(device)
 
     # Create frozen reference model (deep copy of SFT model)
